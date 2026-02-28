@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ app_name }} - 智能文档问答系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11"></script>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' }}}}
+        }
+    </script>
+</head>
+<body class="h-full bg-gray-950 text-gray-100 flex overflow-hidden">
+
+<!-- ========== 左侧边栏 ========== -->
+<aside id="sidebar" class="w-72 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0 transition-all">
+    <!-- Logo -->
+    <div class="p-4 border-b border-gray-800 flex items-center gap-3">
+        <div class="w-9 h-9 rounded-lg bg-brand-600 flex items-center justify-center font-bold text-lg">R</div>
+        <div>
+            <h1 class="text-base font-bold text-white">{{ app_name }}</h1>
+            <p class="text-xs text-gray-500">v{{ version }}</p>
+        </div>
+    </div>
+
+    <!-- 知识库列表 -->
+    <div class="flex-1 overflow-y-auto p-3 space-y-2">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">知识库</span>
+            <button onclick="showCreateKBModal()" class="text-xs text-brand-500 hover:text-brand-400 transition">+ 新建</button>
+        </div>
+        <div id="kb-list" class="space-y-1">
+            <div class="text-xs text-gray-600 text-center py-8">暂无知识库，请先创建</div>
+        </div>
+    </div>
+
+    <!-- 文档区域 -->
+    <div id="doc-section" class="border-t border-gray-800 p-3 hidden">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">文档</span>
+            <label class="text-xs text-brand-500 hover:text-brand-400 cursor-pointer transition">
+                + 上传
+                <input type="file" class="hidden" id="file-input" accept=".pdf,.docx,.doc,.md,.txt,.html" onchange="uploadDocument(this)">
+            </label>
+        </div>
+        <div id="doc-list" class="space-y-1 max-h-40 overflow-y-auto">
+        </div>
+    </div>
+
+    <!-- 底部状态 -->
+    <div class="p-3 border-t border-gray-800 text-xs text-gray-600">
+        <div class="flex items-center gap-2">
+            <span id="status-dot" class="w-2 h-2 rounded-full bg-emerald-500"></span>
+            <span id="status-text">系统就绪</span>
+        </div>
+    </div>
+</aside>
+
+<!-- ========== 主内容区 ========== -->
+<main class="flex-1 flex flex-col min-w-0">
+    <!-- 顶栏 -->
+    <header class="h-14 border-b border-gray-800 flex items-center justify-between px-5 shrink-0 bg-gray-900/50 backdrop-blur">
+        <div class="flex items-center gap-3">
+            <h2 id="current-kb-name" class="text-sm font-medium text-gray-300">选择一个知识库开始对话</h2>
+        </div>
+        <div class="flex items-center gap-3">
+            <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300 transition px-2 py-1 rounded hover:bg-gray-800">清空对话</button>
+            <a href="/api/docs" target="_blank" class="text-xs text-gray-500 hover:text-gray-300 transition px-2 py-1 rounded hover:bg-gray-800">API 文档</a>
+        </div>
+    </header>
+
+    <!-- 聊天区域 -->
+    <div id="chat-area" class="flex-1 overflow-y-auto p-5">
+        <!-- 欢迎页 -->
+        <div id="welcome" class="flex flex-col items-center justify-center h-full text-center">
+            <div class="w-20 h-20 rounded-2xl bg-brand-600/20 flex items-center justify-center mb-6">
+                <svg class="w-10 h-10 text-brand-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z"/>
+                </svg>
+            </div>
+            <h3 class="text-xl font-semibold text-white mb-2">欢迎使用 MyRAG</h3>
+            <p class="text-gray-500 text-sm max-w-md mb-8">
+                智能文档问答系统，基于 RAG（检索增强生成）架构。<br>
+                上传您的文档，即可与文档内容进行智能对话。
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl w-full">
+                <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-left hover:border-brand-600/50 transition">
+                    <div class="text-brand-500 font-semibold text-sm mb-1">多格式支持</div>
+                    <p class="text-xs text-gray-500">支持 PDF、Word、Markdown、HTML 等多种文档格式</p>
+                </div>
+                <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-left hover:border-brand-600/50 transition">
+                    <div class="text-brand-500 font-semibold text-sm mb-1">智能检索</div>
+                    <p class="text-xs text-gray-500">混合检索 + 语义重排，精准定位文档相关内容</p>
+                </div>
+                <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-left hover:border-brand-600/50 transition">
+                    <div class="text-brand-500 font-semibold text-sm mb-1">流式对话</div>
+                    <p class="text-xs text-gray-500">基于 SSE 的流式回答，实时展示生成过程</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 消息列表 -->
+        <div id="messages" class="space-y-6 max-w-4xl mx-auto hidden"></div>
+    </div>
+
+    <!-- 输入区域 -->
+    <div class="border-t border-gray-800 p-4 bg-gray-900/50 backdrop-blur shrink-0">
+        <div class="max-w-4xl mx-auto">
+            <div class="flex gap-3 items-end">
+                <div class="flex-1 relative">
+                    <textarea
+                        id="chat-input"
+                        placeholder="输入您的问题... (Ctrl+Enter 发送)"
+                        rows="1"
+                        class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 pr-12 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-brand-600 focus:ring-1 focus:ring-brand-600/50 resize-none transition"
+                        onkeydown="handleInputKeydown(event)"
+                        oninput="autoResize(this)"
+                        disabled
+                    ></textarea>
+                </div>
+                <button
+                    id="send-btn"
+                    onclick="sendMessage()"
+                    disabled
+                    class="h-11 px-5 bg-brand-600 hover:bg-brand-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-xl text-sm font-medium transition flex items-center gap-2 shrink-0"
+                >
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5"/>
+                    </svg>
+                    发送
+                </button>
+            </div>
+            <div class="flex items-center justify-between mt-2 text-xs text-gray-600">
+                <span>支持 Markdown 格式 · Ctrl + Enter 发送</span>
+                <span id="token-info"></span>
+            </div>
+        </div>
+    </div>
+</main>
+
+<!-- ========== 创建知识库 Modal ========== -->
+<div id="create-kb-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-md p-6 shadow-2xl">
+        <h3 class="text-lg font-semibold text-white mb-4">创建知识库</h3>
+        <div class="space-y-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">名称 <span class="text-red-400">*</span></label>
+                <input id="kb-name-input" type="text" placeholder="例如：产品文档"
+                    class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-600">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">描述</label>
+                <textarea id="kb-desc-input" placeholder="简要描述知识库用途..." rows="2"
+                    class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-600 resize-none"></textarea>
+            </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-6">
+            <button onclick="hideCreateKBModal()" class="px-4 py-2 text-sm text-gray-400 hover:text-white transition">取消</button>
+            <button onclick="createKnowledgeBase()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 rounded-lg text-sm font-medium transition">创建</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 上传进度 Toast ========== -->
+<div id="toast" class="fixed top-5 right-5 z-50 hidden">
+    <div class="bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 shadow-lg flex items-center gap-3">
+        <div id="toast-icon"></div>
+        <span id="toast-text" class="text-sm"></span>
+    </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

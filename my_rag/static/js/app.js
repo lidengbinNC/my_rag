@@ -158,7 +158,7 @@ function renderDocList(docs) {
                 <span class="text-base">${getFileIcon(doc.filename)}</span>
                 <div class="min-w-0">
                     <div class="text-xs text-gray-300 truncate" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</div>
-                    <div class="text-xs text-gray-600">${formatFileSize(doc.file_size)} · <span class="status-${doc.status}">${statusText(doc.status)}</span></div>
+                    <div class="text-xs text-gray-600">${formatFileSize(doc.file_size)} · <span class="status-${doc.status}">${statusText(doc.status)}</span>${doc.chunk_count > 0 ? ` · ${doc.chunk_count} 块` : ''}</div>
                 </div>
             </div>
             <button onclick="deleteDoc('${doc.id}')" class="text-gray-700 hover:text-red-400 transition opacity-0 group-hover:opacity-100 p-0.5">
@@ -183,9 +183,9 @@ async function uploadDocument(input) {
         });
         const json = await res.json();
         if (json.code === 200) {
-            showToast("文档上传成功", "success");
+            showToast("文档已上传，正在解析分块...", "info");
             await loadDocuments();
-            await loadKnowledgeBases();
+            pollDocumentStatus(json.data.id);
         } else {
             showToast(json.message || "上传失败", "error");
         }
@@ -193,6 +193,28 @@ async function uploadDocument(input) {
         showToast("上传失败: " + e.message, "error");
     }
     input.value = "";
+}
+
+function pollDocumentStatus(docId) {
+    const poll = setInterval(async () => {
+        try {
+            const res = await fetch(`${API}/documents/${docId}/status`);
+            const json = await res.json();
+            const status = json.data?.status;
+            if (status === "completed") {
+                clearInterval(poll);
+                showToast(`文档处理完成，已生成 ${json.data.chunk_count} 个分块`, "success");
+                await loadDocuments();
+                await loadKnowledgeBases();
+            } else if (status === "failed") {
+                clearInterval(poll);
+                showToast("文档处理失败", "error");
+                await loadDocuments();
+            }
+        } catch {
+            clearInterval(poll);
+        }
+    }, 1500);
 }
 
 async function deleteDoc(docId) {

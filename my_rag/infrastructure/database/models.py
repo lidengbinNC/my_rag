@@ -53,6 +53,9 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(default=func.now())
 
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="documents")
+    chunks: Mapped[list["Chunk"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", order_by="Chunk.chunk_index"
+    )
 
 
 class Conversation(Base):
@@ -69,6 +72,25 @@ class Conversation(Base):
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at"
     )
+
+
+class Chunk(Base):
+    __tablename__ = "chunks"
+    __table_args__ = (
+        Index("idx_chunk_doc_id", "document_id"),
+        Index("idx_chunk_kb_id", "knowledge_base_id"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_index: Mapped[int] = mapped_column(default=0)
+    token_count: Mapped[int] = mapped_column(default=0)
+    metadata_json: Mapped[str | None] = mapped_column(Text, default=None)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"))
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"))
+    created_at: Mapped[datetime] = mapped_column(default=func.now())
+
+    document: Mapped["Document"] = relationship(back_populates="chunks")
 
 
 class Message(Base):

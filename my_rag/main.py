@@ -22,6 +22,7 @@ from my_rag.api.routes import api_router
 from my_rag.config.settings import settings
 from my_rag.infrastructure.database.session import init_db
 from my_rag.utils.logger import get_logger, setup_logging
+from my_rag.utils.token_counter import warm_up as warm_up_tokenizer
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -38,6 +39,9 @@ async def lifespan(app: FastAPI):
     logger.info("database_initialized")
 
     settings.upload_path.mkdir(parents=True, exist_ok=True)
+
+    warm_up_tokenizer()
+    logger.info("tokenizer_ready")
 
     yield
 

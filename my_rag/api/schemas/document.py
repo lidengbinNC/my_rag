@@ -19,3 +19,12 @@ class DocumentListResponse(BaseModel):
     """文档列表响应"""
     items: list[DocumentResponse] = Field(default_factory=list)
     total: int = 0
+
+
+class ChunkResponse(BaseModel):
+    """分块响应"""
+    id: str
+    content: str
+    chunk_index: int
+    token_count: int
+    document_id: str

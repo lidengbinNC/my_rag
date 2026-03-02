@@ -5,6 +5,10 @@ from my_rag.domain.chunking.fixed_chunker import FixedChunker
 from my_rag.domain.chunking.recursive_chunker import RecursiveChunker
 
 
+# 1-TODO: 增加Semantic：按 embedding 相似度切，的实现方案
+"""
+    TODO:现在只实现了 fixed，recursive两种，后续考虑，增加Semantic：按 embedding 相似度切，的实现方案
+"""
 _STRATEGY_MAP: dict[str, type[BaseChunker]] = {
     "fixed": FixedChunker,
     "recursive": RecursiveChunker,

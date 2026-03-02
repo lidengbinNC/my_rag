@@ -43,6 +43,13 @@ async def lifespan(app: FastAPI):
     warm_up_tokenizer()
     logger.info("tokenizer_ready")
 
+    # 启动时重建 BM25 索引
+    from my_rag.core.dependencies import get_sparse_retriever
+    from my_rag.infrastructure.database.session import async_session_factory
+    from my_rag.core.document_pipeline import _rebuild_bm25_index
+    async with async_session_factory() as session:
+        await _rebuild_bm25_index(session, get_sparse_retriever())
+
     yield
 
     logger.info("myrag_shutdown")

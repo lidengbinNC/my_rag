@@ -46,8 +46,14 @@ class LLMSettings(BaseSettings):
 class EmbeddingSettings(BaseSettings):
     """Embedding 配置"""
     provider: str = Field(default="local", alias="EMBEDDING_PROVIDER")
-    model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
-    dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
+    model: str = Field(default="BAAI/bge-small-zh-v1.5", alias="EMBEDDING_MODEL")
+    dimension: int = Field(default=512, alias="EMBEDDING_DIMENSION")
+
+
+class RetrievalSettings(BaseSettings):
+    """检索配置"""
+    top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")
+    rrf_k: int = Field(default=60, alias="RETRIEVAL_RRF_K")
 
 
 class ChunkSettings(BaseSettings):
@@ -76,6 +82,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     llm: LLMSettings = LLMSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
+    retrieval: RetrievalSettings = RetrievalSettings()
     chunk: ChunkSettings = ChunkSettings()
     storage: StorageSettings = StorageSettings()
 

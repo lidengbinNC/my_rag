@@ -1,13 +1,13 @@
 """
-对话接口 - Phase 1 使用 Mock 响应，后续接入真实 RAG Pipeline
+对话接口 - 接入真实 RAG Pipeline
 
 面试考点：
-- SSE（Server-Sent Events）流式响应
-- AsyncGenerator 实现流式输出
+- SSE（Server-Sent Events）流式响应：HTTP 长连接，服务端单向推送
+- AsyncGenerator 实现 token-by-token 流式输出
 - 多轮对话上下文管理
+- RAG Pipeline 集成：Retrieve → Prompt → Generate
 """
 
-import asyncio
 import json
 import uuid
 from datetime import datetime
@@ -25,69 +25,49 @@ from my_rag.api.schemas.chat import (
     TokenUsage,
 )
 from my_rag.api.schemas.common import APIResponse
+from my_rag.core.dependencies import get_rag_pipeline
 from my_rag.infrastructure.database import (
     Conversation,
     KnowledgeBase,
     Message,
     get_db,
 )
+from my_rag.utils.logger import get_logger
 
 router = APIRouter(prefix="/chat")
-
-MOCK_SOURCES = [
-    SourceDocument(
-        content="RAG（检索增强生成）是一种结合信息检索与语言模型生成的技术框架...",
-        source="rag_overview.pdf",
-        score=0.95,
-        chunk_id="chunk-001",
-    ),
-    SourceDocument(
-        content="向量数据库通过 ANN（近似最近邻）算法实现高效的向量相似度检索...",
-        source="vector_db_guide.md",
-        score=0.87,
-        chunk_id="chunk-002",
-    ),
-]
+logger = get_logger(__name__)
 
 
-def _mock_answer(query: str) -> str:
-    """Phase 1 模拟回答"""
-    return (
-        f"感谢您的提问！关于「{query}」，"
-        "根据知识库中的文档，我为您整理了以下信息：\n\n"
-        "**核心要点：**\n\n"
-        "1. RAG（Retrieval-Augmented Generation）是一种将信息检索与大语言模型"
-        "生成能力相结合的技术框架，能够有效减少幻觉问题。\n\n"
-        "2. 系统通过将用户查询转换为向量表示，在向量数据库中检索最相关的文档片段，"
-        "然后将这些片段作为上下文传递给 LLM 进行回答生成。\n\n"
-        "3. 混合检索（Hybrid Retrieval）结合了稠密向量检索和稀疏关键词检索（BM25），"
-        "通过 RRF（Reciprocal Rank Fusion）算法融合排序结果，显著提升检索质量。\n\n"
-        "> **注意**：当前为演示模式，回答基于模拟数据。接入真实 RAG Pipeline 后，"
-        "将根据您上传的文档内容进行精确回答。"
-    )
+def _build_chat_history(messages: list[Message], max_turns: int = 5) -> str:
+    """构建对话历史字符串（最近 N 轮）"""
+    recent = messages[-(max_turns * 2):]
+    parts = []
+    for msg in recent:
+        role_label = "用户" if msg.role == "user" else "助手"
+        parts.append(f"{role_label}: {msg.content}")
+    return "\n".join(parts)
 
 
-async def _stream_mock_response(query: str, conversation_id: str):
-    """SSE 流式模拟响应"""
-    retrieval_event = {
-        "type": "retrieval",
-        "documents": [s.model_dump() for s in MOCK_SOURCES],
-    }
-    yield f"data: {json.dumps(retrieval_event, ensure_ascii=False)}\n\n"
-    await asyncio.sleep(0.3)
+async def _stream_rag_response(query: str, knowledge_base_id: str, conversation_id: str, chat_history: str):
+    """SSE 流式 RAG 响应"""
+    pipeline = get_rag_pipeline()
 
-    answer = _mock_answer(query)
-    for char in answer:
-        token_event = {"type": "token", "content": char}
-        yield f"data: {json.dumps(token_event, ensure_ascii=False)}\n\n"
-        await asyncio.sleep(0.02)
-
-    done_event = {
-        "type": "done",
-        "conversation_id": conversation_id,
-        "usage": {"prompt_tokens": 520, "completion_tokens": 180, "total_tokens": 700},
-    }
-    yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+    async for event in pipeline.stream(
+        query=query,
+        knowledge_base_id=knowledge_base_id,
+        chat_history=chat_history,
+    ):
+        if event["type"] == "retrieval":
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        elif event["type"] == "token":
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        elif event["type"] == "done":
+            done_event = {
+                "type": "done",
+                "conversation_id": conversation_id,
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }
+            yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
 
 
 @router.post("/completions")
@@ -123,10 +103,18 @@ async def chat_completions(
     )
     db.add(user_msg)
 
+    history_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at)
+    )
+    history_messages = list(history_result.scalars().all())
+    chat_history = _build_chat_history(history_messages)
+
     if body.stream:
         await db.commit()
         return StreamingResponse(
-            _stream_mock_response(body.query, conversation.id),
+            _stream_rag_response(body.query, body.knowledge_base_id, conversation.id, chat_history),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -135,13 +123,28 @@ async def chat_completions(
             },
         )
 
-    answer = _mock_answer(body.query)
-    sources_json = json.dumps([s.model_dump() for s in MOCK_SOURCES], ensure_ascii=False)
+    pipeline = get_rag_pipeline()
+    rag_result = await pipeline.run(
+        query=body.query,
+        knowledge_base_id=body.knowledge_base_id,
+        chat_history=chat_history,
+    )
+
+    sources = [
+        SourceDocument(
+            content=s.content,
+            source=s.source,
+            score=s.score,
+            chunk_id=s.chunk_id,
+        )
+        for s in rag_result.sources
+    ]
+    sources_json = json.dumps([s.model_dump() for s in sources], ensure_ascii=False)
 
     assistant_msg = Message(
         id=str(uuid.uuid4()),
         role="assistant",
-        content=answer,
+        content=rag_result.answer,
         sources_json=sources_json,
         conversation_id=conversation.id,
         created_at=datetime.now(),
@@ -150,10 +153,10 @@ async def chat_completions(
 
     return APIResponse(
         data=ChatResponse(
-            answer=answer,
-            sources=MOCK_SOURCES,
+            answer=rag_result.answer,
+            sources=sources,
             conversation_id=conversation.id,
-            usage=TokenUsage(prompt_tokens=520, completion_tokens=180, total_tokens=700),
+            usage=TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
         )
     )
 

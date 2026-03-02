@@ -26,6 +26,12 @@ dependencies = [
     "chardet>=5.2.0",
     # Phase 2: Chunking & token counting
     "tiktoken>=0.7.0",
+    # Phase 3: Embedding + Retrieval + LLM
+    "sentence-transformers>=3.0.0",
+    "faiss-cpu>=1.8.0",
+    "rank-bm25>=0.2.2",
+    "openai>=1.30.0",
+    "jieba>=0.42.0",
 ]
 
 [project.optional-dependencies]

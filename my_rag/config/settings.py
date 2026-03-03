@@ -100,6 +100,17 @@ class StorageSettings(BaseSettings):
     max_file_size: int = 50 * 1024 * 1024
 
 
+class DingTalkSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="DINGTALK_", extra="ignore",
+    )
+
+    enabled: bool = False
+    webhook_url: str = ""
+    secret: str = ""
+
+
 class Settings(BaseSettings):
     """全局配置聚合"""
 
@@ -115,6 +126,7 @@ class Settings(BaseSettings):
     retrieval: RetrievalSettings = RetrievalSettings()
     chunk: ChunkSettings = ChunkSettings()
     storage: StorageSettings = StorageSettings()
+    dingtalk: DingTalkSettings = DingTalkSettings()
 
     @property
     def base_dir(self) -> Path:

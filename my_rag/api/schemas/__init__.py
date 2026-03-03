@@ -6,6 +6,11 @@ from my_rag.api.schemas.knowledge import (
     KnowledgeBaseUpdate,
     KnowledgeBaseResponse,
 )
+from my_rag.api.schemas.notification import (
+    DingTalkTextRequest,
+    DingTalkMarkdownRequest,
+    DingTalkSendResult,
+)
 
 __all__ = [
     "APIResponse",
@@ -20,4 +25,7 @@ __all__ = [
     "KnowledgeBaseCreate",
     "KnowledgeBaseUpdate",
     "KnowledgeBaseResponse",
+    "DingTalkTextRequest",
+    "DingTalkMarkdownRequest",
+    "DingTalkSendResult",
 ]

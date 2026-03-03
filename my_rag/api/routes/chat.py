@@ -8,6 +8,7 @@
 - RAG Pipeline 集成：Retrieve → Prompt → Generate
 """
 
+import asyncio
 import json
 import uuid
 from datetime import datetime
@@ -25,7 +26,7 @@ from my_rag.api.schemas.chat import (
     TokenUsage,
 )
 from my_rag.api.schemas.common import APIResponse
-from my_rag.core.dependencies import get_rag_pipeline
+from my_rag.core.dependencies import get_dingtalk_notifier, get_rag_pipeline
 from my_rag.infrastructure.database import (
     Conversation,
     KnowledgeBase,
@@ -36,6 +37,24 @@ from my_rag.utils.logger import get_logger
 
 router = APIRouter(prefix="/chat")
 logger = get_logger(__name__)
+
+
+async def _notify_dingtalk(query: str, answer: str) -> None:
+    """问答完成后异步推送钉钉通知（旁路逻辑，失败不影响主流程）"""
+    notifier = get_dingtalk_notifier()
+    if notifier is None:
+        return
+    try:
+        md = (
+            f"### RAG 问答通知\n\n"
+            f"**问题：** {query}\n\n"
+            f"**回答：** {answer[:500]}{'...' if len(answer) > 500 else ''}\n\n"
+            f"---\n"
+            f"*来自 MyRAG 系统*"
+        )
+        await notifier.send_markdown(title="RAG 问答通知", text=md)
+    except Exception as exc:
+        logger.warning("dingtalk_notify_failed", error=str(exc))
 
 
 def _build_chat_history(messages: list[Message], max_turns: int = 5) -> str:
@@ -68,6 +87,7 @@ async def _stream_rag_response(query: str, knowledge_base_id: str, conversation_
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             }
             yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+            asyncio.create_task(_notify_dingtalk(query, event.get("full_answer", "")))
 
 
 @router.post("/completions")
@@ -150,6 +170,8 @@ async def chat_completions(
         created_at=datetime.now(),
     )
     db.add(assistant_msg)
+
+    asyncio.create_task(_notify_dingtalk(body.query, rag_result.answer))
 
     return APIResponse(
         data=ChatResponse(

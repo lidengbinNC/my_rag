@@ -17,6 +17,7 @@ from my_rag.domain.embedding.base import BaseEmbedding
 from my_rag.domain.llm.base import BaseLLM
 from my_rag.domain.retrieval.base import BaseRetriever
 from my_rag.domain.retrieval.query_rewriter import QueryRewriter
+from my_rag.infrastructure.notification.base import BaseNotifier
 from my_rag.infrastructure.vector_store.base import BaseVectorStore
 
 _embedding: BaseEmbedding | None = None
@@ -26,6 +27,7 @@ _llm: BaseLLM | None = None
 _query_rewriter: QueryRewriter | None = None
 _semantic_cache: SemanticCache | None = None
 _rag_pipeline: RAGPipeline | None = None
+_dingtalk_notifier: BaseNotifier | None = None
 
 
 def get_embedding() -> BaseEmbedding:
@@ -124,3 +126,17 @@ def get_rag_pipeline() -> RAGPipeline:
             enable_cache=settings.retrieval.enable_cache,
         )
     return _rag_pipeline
+
+
+def get_dingtalk_notifier() -> BaseNotifier | None:
+    """获取钉钉通知器（未启用时返回 None）"""
+    global _dingtalk_notifier
+    if _dingtalk_notifier is None:
+        if not settings.dingtalk.enabled or not settings.dingtalk.webhook_url:
+            return None
+        from my_rag.infrastructure.notification.dingtalk_notifier import DingTalkNotifier
+        _dingtalk_notifier = DingTalkNotifier(
+            webhook_url=settings.dingtalk.webhook_url,
+            secret=settings.dingtalk.secret,
+        )
+    return _dingtalk_notifier

@@ -2,79 +2,104 @@
 配置管理模块 - 基于 Pydantic Settings
 
 面试考点：
-- Pydantic Settings 实现多环境配置
-- 环境变量优先级：.env 文件 < 系统环境变量 < 代码默认值
-- 配置分组与嵌套
-- 类型安全的配置管理（对比 Java 的 @ConfigurationProperties）
+- Pydantic Settings 的 env_prefix 实现分组环境变量读取
+- env_file 使用绝对路径避免 CWD 不一致的问题
+- 嵌套 BaseSettings 子类需各自声明 env_file，父类不会传递
+- 环境变量优先级：系统环境变量 > .env 文件 > 代码默认值
 """
 
 from pathlib import Path
 from functools import lru_cache
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 
 
 class AppSettings(BaseSettings):
-    """应用基础配置"""
-    name: str = Field(default="MyRAG", alias="APP_NAME")
-    version: str = Field(default="0.1.0", alias="APP_VERSION")
-    debug: bool = Field(default=True, alias="APP_DEBUG")
-    host: str = Field(default="0.0.0.0", alias="APP_HOST")
-    port: int = Field(default=8000, alias="APP_PORT")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="APP_", extra="ignore",
+    )
+
+    name: str = "MyRAG"
+    version: str = "0.1.0"
+    debug: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8000
 
 
 class DatabaseSettings(BaseSettings):
-    """数据库配置"""
-    url: str = Field(
-        default="sqlite+aiosqlite:///./data/myrag.db",
-        alias="DATABASE_URL",
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="DATABASE_", extra="ignore",
     )
-    echo: bool = Field(default=False, alias="DATABASE_ECHO")
+
+    url: str = "sqlite+aiosqlite:///./data/myrag.db"
+    echo: bool = False
 
 
 class LLMSettings(BaseSettings):
-    """LLM 配置"""
-    provider: str = Field(default="openai", alias="LLM_PROVIDER")
-    model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
-    api_key: str = Field(default="", alias="LLM_API_KEY")
-    base_url: str = Field(default="https://api.openai.com/v1", alias="LLM_BASE_URL")
-    max_tokens: int = Field(default=2048, alias="LLM_MAX_TOKENS")
-    temperature: float = Field(default=0.7, alias="LLM_TEMPERATURE")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="LLM_", extra="ignore",
+    )
+
+    provider: str = "openai"
+    model: str = "gpt-4o-mini"
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    max_tokens: int = 2048
+    temperature: float = 0.7
 
 
 class EmbeddingSettings(BaseSettings):
-    """Embedding 配置"""
-    provider: str = Field(default="local", alias="EMBEDDING_PROVIDER")
-    model: str = Field(default="BAAI/bge-small-zh-v1.5", alias="EMBEDDING_MODEL")
-    dimension: int = Field(default=512, alias="EMBEDDING_DIMENSION")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="EMBEDDING_", extra="ignore",
+    )
+
+    provider: str = "local"
+    model: str = "BAAI/bge-small-zh-v1.5"
+    dimension: int = 512
 
 
 class RetrievalSettings(BaseSettings):
-    """检索配置"""
-    top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")
-    rrf_k: int = Field(default=60, alias="RETRIEVAL_RRF_K")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="RETRIEVAL_", extra="ignore",
+    )
+
+    top_k: int = 5
+    rrf_k: int = 60
 
 
 class ChunkSettings(BaseSettings):
-    """分块配置"""
-    size: int = Field(default=512, alias="CHUNK_SIZE")
-    overlap: int = Field(default=50, alias="CHUNK_OVERLAP")
-    strategy: str = Field(default="recursive", alias="CHUNK_STRATEGY")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="CHUNK_", extra="ignore",
+    )
+
+    size: int = 512
+    overlap: int = 50
+    strategy: str = "recursive"
 
 
 class StorageSettings(BaseSettings):
-    """文件存储配置"""
-    upload_dir: str = Field(default="./data/uploads", alias="UPLOAD_DIR")
-    max_file_size: int = Field(default=50 * 1024 * 1024, alias="MAX_FILE_SIZE")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    upload_dir: str = "./data/uploads"
+    max_file_size: int = 50 * 1024 * 1024
 
 
 class Settings(BaseSettings):
     """全局配置聚合"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
         extra="ignore",
     )
 

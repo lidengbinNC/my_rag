@@ -160,10 +160,24 @@ async def process_document(document_id: str) -> None:
 
 
 async def _rebuild_bm25_index(session, sparse_retriever) -> None:
-    """从数据库加载全部 chunk 重建 BM25 索引"""
+    """从数据库加载全部 chunk 重建 BM25 索引。
+    
+    该函数用于在文档处理后更新全局 BM25 关键词检索索引，
+    确保新上传的文档可以被关键词搜索到。
+    
+    Args:
+        session: 异步数据库会话对象，用于查询 Chunk 数据
+        sparse_retriever: SparseRetriever 实例，用于构建BM25 索引
+    
+    Returns:
+        None
+    """
     from sqlalchemy import select
+    # 查询数据库中所有 Chunk 记录
     result = await session.execute(select(Chunk))
     all_chunks = result.scalars().all()
+    
+    # 构建语料库，提取每个 chunk 的关键信息用于 BM25 索引
     corpus = [
         {
             "id": c.id,
@@ -173,5 +187,8 @@ async def _rebuild_bm25_index(session, sparse_retriever) -> None:
         }
         for c in all_chunks
     ]
+    
+    # 重建 BM25 倒排索引（全量替换）
+    # 这里简单了解下 正排索引和倒排索引的概念 区别就明白了
     sparse_retriever.build_index(corpus)
     logger.info("bm25_index_rebuilt", total_chunks=len(corpus))

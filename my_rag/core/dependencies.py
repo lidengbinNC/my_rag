@@ -45,13 +45,19 @@ def get_vector_store() -> BaseVectorStore:
         )
     return _vector_store
 
-
 def get_sparse_retriever():
+    """获取稀疏检索器的单例实例。
+
+    使用函数属性实现单例模式，确保 SparseRetriever 实例全局唯一。
+
+    Returns:
+        SparseRetriever: 稀疏检索器实例
+    """
     from my_rag.domain.retrieval.sparse_retriever import SparseRetriever
+    # 检查是否已创建实例，未创建则初始化
     if not hasattr(get_sparse_retriever, "_instance"):
         get_sparse_retriever._instance = SparseRetriever()
     return get_sparse_retriever._instance
-
 
 def get_retriever() -> BaseRetriever:
     global _retriever

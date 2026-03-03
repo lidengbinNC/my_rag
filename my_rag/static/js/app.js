@@ -8,6 +8,7 @@ const state = {
     currentKB: null,
     conversationId: null,
     isStreaming: false,
+    useStream: true,
     knowledgeBases: [],
 };
 
@@ -231,6 +232,10 @@ async function deleteDoc(docId) {
 
 // ==================== 对话 ====================
 
+function toggleStream(checkbox) {
+    state.useStream = checkbox.checked;
+}
+
 async function sendMessage() {
     if (state.isStreaming || !state.currentKB) return;
 
@@ -261,52 +266,14 @@ async function sendMessage() {
                 query,
                 knowledge_base_id: state.currentKB.id,
                 conversation_id: state.conversationId,
-                stream: true,
+                stream: state.useStream,
             }),
         });
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let fullAnswer = "";
-        let sources = [];
-        let buffer = "";
-
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-                if (!line.startsWith("data: ")) continue;
-                try {
-                    const event = JSON.parse(line.slice(6));
-
-                    if (event.type === "retrieval") {
-                        sources = event.documents || [];
-                    } else if (event.type === "token") {
-                        fullAnswer += event.content;
-                        contentEl.innerHTML = renderMarkdown(fullAnswer);
-                        contentEl.classList.add("typing-cursor");
-                        scrollToBottom();
-                    } else if (event.type === "done") {
-                        state.conversationId = event.conversation_id || state.conversationId;
-                        if (event.usage) {
-                            document.getElementById("token-info").textContent =
-                                `Tokens: ${event.usage.prompt_tokens} + ${event.usage.completion_tokens} = ${event.usage.total_tokens}`;
-                        }
-                    }
-                } catch {}
-            }
-        }
-
-        contentEl.classList.remove("typing-cursor");
-        contentEl.innerHTML = renderMarkdown(fullAnswer);
-
-        if (sources.length > 0) {
-            appendSources(assistantEl, sources);
+        if (state.useStream) {
+            await handleStreamResponse(res, contentEl, assistantEl);
+        } else {
+            await handleNormalResponse(res, contentEl, assistantEl);
         }
     } catch (e) {
         contentEl.innerHTML = `<span class="text-red-400">请求失败: ${escapeHtml(e.message)}</span>`;
@@ -315,6 +282,74 @@ async function sendMessage() {
     state.isStreaming = false;
     updateSendButton();
     scrollToBottom();
+}
+
+async function handleStreamResponse(res, contentEl, assistantEl) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let fullAnswer = "";
+    let sources = [];
+    let buffer = "";
+
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+                const event = JSON.parse(line.slice(6));
+
+                if (event.type === "retrieval") {
+                    sources = event.documents || [];
+                } else if (event.type === "token") {
+                    fullAnswer += event.content;
+                    contentEl.innerHTML = renderMarkdown(fullAnswer);
+                    contentEl.classList.add("typing-cursor");
+                    scrollToBottom();
+                } else if (event.type === "done") {
+                    state.conversationId = event.conversation_id || state.conversationId;
+                    if (event.usage) {
+                        document.getElementById("token-info").textContent =
+                            `Tokens: ${event.usage.prompt_tokens} + ${event.usage.completion_tokens} = ${event.usage.total_tokens}`;
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    contentEl.classList.remove("typing-cursor");
+    contentEl.innerHTML = renderMarkdown(fullAnswer);
+
+    if (sources.length > 0) {
+        appendSources(assistantEl, sources);
+    }
+}
+
+async function handleNormalResponse(res, contentEl, assistantEl) {
+    const json = await res.json();
+    const data = json.data;
+
+    if (!data) {
+        contentEl.innerHTML = `<span class="text-red-400">请求失败: ${escapeHtml(json.message || "未知错误")}</span>`;
+        return;
+    }
+
+    state.conversationId = data.conversation_id || state.conversationId;
+    contentEl.innerHTML = renderMarkdown(data.answer);
+
+    if (data.usage) {
+        document.getElementById("token-info").textContent =
+            `Tokens: ${data.usage.prompt_tokens} + ${data.usage.completion_tokens} = ${data.usage.total_tokens}`;
+    }
+
+    if (data.sources && data.sources.length > 0) {
+        appendSources(assistantEl, data.sources);
+    }
 }
 
 function appendMessage(role, content) {

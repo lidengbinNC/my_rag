@@ -137,7 +137,14 @@
                 </button>
             </div>
             <div class="flex items-center justify-between mt-2 text-xs text-gray-600">
-                <span>支持 Markdown 格式 · Ctrl + Enter 发送</span>
+                <div class="flex items-center gap-4">
+                    <span>支持 Markdown 格式 · Ctrl + Enter 发送</span>
+                    <label class="flex items-center gap-1.5 cursor-pointer select-none group">
+                        <input type="checkbox" id="stream-toggle" checked onchange="toggleStream(this)"
+                            class="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-brand-600 focus:ring-brand-600/50 focus:ring-offset-0 cursor-pointer">
+                        <span class="group-hover:text-gray-400 transition">流式返回</span>
+                    </label>
+                </div>
                 <span id="token-info"></span>
             </div>
         </div>

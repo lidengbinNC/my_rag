@@ -5,19 +5,26 @@
 - 模块级单例：利用 Python 模块的天然单例特性管理全局组件
 - 对比 Java 的 Spring IoC 容器：Python 更轻量，用工厂 + 全局变量即可
 - 延迟初始化（Lazy Init）：首次访问时才创建，避免启动时加载全部重量级模型
+- 组件依赖链：Embedding → VectorStore → DenseRetriever + SparseRetriever → HybridRetriever
+                                                                              ↓
+                                         LLM → QueryRewriter + SemanticCache → RAGPipeline
 """
 
 from my_rag.config.settings import settings
 from my_rag.core.rag_pipeline import RAGPipeline
+from my_rag.core.semantic_cache import SemanticCache
 from my_rag.domain.embedding.base import BaseEmbedding
 from my_rag.domain.llm.base import BaseLLM
 from my_rag.domain.retrieval.base import BaseRetriever
+from my_rag.domain.retrieval.query_rewriter import QueryRewriter
 from my_rag.infrastructure.vector_store.base import BaseVectorStore
 
 _embedding: BaseEmbedding | None = None
 _vector_store: BaseVectorStore | None = None
 _retriever: BaseRetriever | None = None
 _llm: BaseLLM | None = None
+_query_rewriter: QueryRewriter | None = None
+_semantic_cache: SemanticCache | None = None
 _rag_pipeline: RAGPipeline | None = None
 
 
@@ -45,19 +52,13 @@ def get_vector_store() -> BaseVectorStore:
         )
     return _vector_store
 
+
 def get_sparse_retriever():
-    """获取稀疏检索器的单例实例。
-
-    使用函数属性实现单例模式，确保 SparseRetriever 实例全局唯一。
-
-    Returns:
-        SparseRetriever: 稀疏检索器实例
-    """
     from my_rag.domain.retrieval.sparse_retriever import SparseRetriever
-    # 检查是否已创建实例，未创建则初始化
     if not hasattr(get_sparse_retriever, "_instance"):
         get_sparse_retriever._instance = SparseRetriever()
     return get_sparse_retriever._instance
+
 
 def get_retriever() -> BaseRetriever:
     global _retriever
@@ -68,7 +69,11 @@ def get_retriever() -> BaseRetriever:
         dense = DenseRetriever(embedding=get_embedding(), vector_store=get_vector_store())
         sparse = get_sparse_retriever()
 
-        _retriever = HybridRetriever(dense_retriever=dense, sparse_retriever=sparse)
+        _retriever = HybridRetriever(
+            dense_retriever=dense,
+            sparse_retriever=sparse,
+            rrf_k=settings.retrieval.rrf_k,
+        )
     return _retriever
 
 
@@ -87,11 +92,35 @@ def get_llm() -> BaseLLM:
     return _llm
 
 
+def get_query_rewriter() -> QueryRewriter:
+    global _query_rewriter
+    if _query_rewriter is None:
+        _query_rewriter = QueryRewriter(llm=get_llm())
+    return _query_rewriter
+
+
+def get_semantic_cache() -> SemanticCache:
+    global _semantic_cache
+    if _semantic_cache is None:
+        _semantic_cache = SemanticCache(
+            embedding=get_embedding(),
+            similarity_threshold=settings.retrieval.cache_similarity_threshold,
+            max_size=500,
+            ttl_seconds=settings.retrieval.cache_ttl_seconds,
+        )
+    return _semantic_cache
+
+
 def get_rag_pipeline() -> RAGPipeline:
     global _rag_pipeline
     if _rag_pipeline is None:
         _rag_pipeline = RAGPipeline(
             retriever=get_retriever(),
             llm=get_llm(),
+            query_rewriter=get_query_rewriter(),
+            semantic_cache=get_semantic_cache(),
+            enable_hyde=settings.retrieval.enable_hyde,
+            enable_multi_query=settings.retrieval.enable_multi_query,
+            enable_cache=settings.retrieval.enable_cache,
         )
     return _rag_pipeline

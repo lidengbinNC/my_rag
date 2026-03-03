@@ -1,20 +1,21 @@
 """
-RAG Pipeline 编排器
+RAG Pipeline 编排器（Phase 4 升级版）
 
 面试考点：
-- Pipeline 模式：将 Query → Retrieve → (Rerank) → Generate 组合为可配置的流水线
-- 各环节职责清晰、可独立替换（依赖倒置原则）
+- Pipeline 模式：Query → (Cache Check) → (Rewrite) → Retrieve → (Rerank) → Generate → (Cache Store)
+- 各环节可独立开关：通过配置决定是否启用 HyDE / Multi-Query / Cache
+- Parent-Child 策略：检索命中 child chunk 时，返回 parent_content 给 LLM
 - 流式输出：AsyncIterator 逐 token 传递给前端
-- 上下文窗口管理：检索结果 + 历史对话 + Query 需控制在 LLM 的 max context 内
 """
 
-import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from my_rag.domain.llm.base import BaseLLM
 from my_rag.domain.prompt.template import build_context, build_prompt
 from my_rag.domain.retrieval.base import BaseRetriever, RetrievalResult
+from my_rag.domain.retrieval.query_rewriter import QueryRewriter
+from my_rag.core.semantic_cache import SemanticCache
 from my_rag.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,18 +27,29 @@ class RAGResponse:
     sources: list[RetrievalResult]
     prompt: str = ""
     usage: dict = field(default_factory=dict)
+    cached: bool = False
 
 
 class RAGPipeline:
-    """RAG Pipeline：Retrieve → Build Prompt → Generate"""
+    """RAG Pipeline：(Cache) → (Rewrite) → Retrieve → Prompt → Generate → (Cache Store)"""
 
     def __init__(
         self,
         retriever: BaseRetriever,
         llm: BaseLLM,
+        query_rewriter: QueryRewriter | None = None,
+        semantic_cache: SemanticCache | None = None,
+        enable_hyde: bool = False,
+        enable_multi_query: bool = False,
+        enable_cache: bool = True,
     ):
         self._retriever = retriever
         self._llm = llm
+        self._rewriter = query_rewriter
+        self._cache = semantic_cache
+        self._enable_hyde = enable_hyde
+        self._enable_multi_query = enable_multi_query
+        self._enable_cache = enable_cache and semantic_cache is not None
 
     async def run(
         self,
@@ -47,20 +59,30 @@ class RAGPipeline:
         chat_history: str = "",
     ) -> RAGResponse:
         """同步执行完整 RAG 流程"""
-        sources = await self._retriever.retrieve(
-            query, top_k=top_k, knowledge_base_id=knowledge_base_id
-        )
+
+        if self._enable_cache and self._cache:
+            cached = await self._cache.get(query)
+            if cached:
+                return RAGResponse(
+                    answer=cached.answer,
+                    sources=[],
+                    cached=True,
+                )
+
+        sources = await self._retrieve_with_rewrite(query, top_k, knowledge_base_id)
 
         logger.info("rag_retrieval_done", query=query[:50], source_count=len(sources))
 
-        context = build_context([
-            {"content": s.content, "source": s.source} for s in sources
-        ])
+        context = self._build_context_from_sources(sources)
         prompt = build_prompt(question=query, context=context, chat_history=chat_history)
 
         answer = await self._llm.generate(prompt)
 
         logger.info("rag_generation_done", answer_length=len(answer))
+
+        if self._enable_cache and self._cache:
+            source_dicts = [{"content": s.content, "source": s.source, "score": s.score} for s in sources]
+            await self._cache.put(query, answer, source_dicts)
 
         return RAGResponse(answer=answer, sources=sources, prompt=prompt)
 
@@ -71,11 +93,17 @@ class RAGPipeline:
         top_k: int = 5,
         chat_history: str = "",
     ) -> AsyncIterator[dict]:
-        """流式 RAG：先返回检索结果，再逐 token 返回生成内容"""
+        """流式 RAG"""
 
-        sources = await self._retriever.retrieve(
-            query, top_k=top_k, knowledge_base_id=knowledge_base_id
-        )
+        if self._enable_cache and self._cache:
+            cached = await self._cache.get(query)
+            if cached:
+                yield {"type": "retrieval", "documents": cached.sources}
+                yield {"type": "token", "content": cached.answer}
+                yield {"type": "done", "full_answer": cached.answer, "sources": cached.sources, "cached": True}
+                return
+
+        sources = await self._retrieve_with_rewrite(query, top_k, knowledge_base_id)
 
         yield {
             "type": "retrieval",
@@ -85,15 +113,17 @@ class RAGPipeline:
             ],
         }
 
-        context = build_context([
-            {"content": s.content, "source": s.source} for s in sources
-        ])
+        context = self._build_context_from_sources(sources)
         prompt = build_prompt(question=query, context=context, chat_history=chat_history)
 
         full_answer = ""
         async for token in self._llm.stream_generate(prompt):
             full_answer += token
             yield {"type": "token", "content": token}
+
+        if self._enable_cache and self._cache:
+            source_dicts = [{"content": s.content, "source": s.source, "score": s.score} for s in sources]
+            await self._cache.put(query, full_answer, source_dicts)
 
         yield {
             "type": "done",
@@ -103,3 +133,35 @@ class RAGPipeline:
                 for s in sources
             ],
         }
+
+    async def _retrieve_with_rewrite(
+        self, query: str, top_k: int, knowledge_base_id: str
+    ) -> list[RetrievalResult]:
+        """带查询改写的检索"""
+
+        if self._rewriter and self._enable_multi_query:
+            sub_queries = await self._rewriter.multi_query(query)
+            all_results: dict[str, RetrievalResult] = {}
+            for sq in sub_queries:
+                results = await self._retriever.retrieve(sq, top_k=top_k, knowledge_base_id=knowledge_base_id)
+                for r in results:
+                    if r.chunk_id not in all_results or r.score > all_results[r.chunk_id].score:
+                        all_results[r.chunk_id] = r
+            sorted_results = sorted(all_results.values(), key=lambda r: r.score, reverse=True)
+            return sorted_results[:top_k]
+
+        if self._rewriter and self._enable_hyde:
+            hyde_doc = await self._rewriter.hyde(query)
+            return await self._retriever.retrieve(hyde_doc, top_k=top_k, knowledge_base_id=knowledge_base_id)
+
+        return await self._retriever.retrieve(query, top_k=top_k, knowledge_base_id=knowledge_base_id)
+
+    @staticmethod
+    def _build_context_from_sources(sources: list[RetrievalResult]) -> str:
+        """构建上下文，若使用 Parent-Child 策略则用 parent_content"""
+        chunks = []
+        for s in sources:
+            parent_content = s.metadata.get("parent_content")
+            content = parent_content if parent_content else s.content
+            chunks.append({"content": content, "source": s.source})
+        return build_context(chunks)

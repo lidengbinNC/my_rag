@@ -1,5 +1,5 @@
 /**
- * MyRAG 前端应用
+ * MyRAG 前端应用 — Phase 4 (WebSocket + 对话历史)
  */
 
 const API = "/api/v1";
@@ -9,7 +9,10 @@ const state = {
     conversationId: null,
     isStreaming: false,
     useStream: true,
+    useWebSocket: false,
+    ws: null,
     knowledgeBases: [],
+    conversations: [],
 };
 
 // ==================== 初始化 ====================
@@ -69,6 +72,7 @@ function selectKB(kbId) {
 
     document.getElementById("current-kb-name").textContent = state.currentKB.name;
     document.getElementById("doc-section").classList.remove("hidden");
+    document.getElementById("conv-section").classList.remove("hidden");
 
     const input = document.getElementById("chat-input");
     input.disabled = false;
@@ -77,6 +81,7 @@ function selectKB(kbId) {
 
     renderKBList();
     loadDocuments();
+    loadConversations();
     clearChat();
 }
 
@@ -123,6 +128,7 @@ async function deleteKB(kbId) {
             state.conversationId = null;
             document.getElementById("current-kb-name").textContent = "选择一个知识库开始对话";
             document.getElementById("doc-section").classList.add("hidden");
+            document.getElementById("conv-section").classList.add("hidden");
             document.getElementById("chat-input").disabled = true;
             document.getElementById("send-btn").disabled = true;
             clearChat();
@@ -230,7 +236,176 @@ async function deleteDoc(docId) {
     }
 }
 
-// ==================== 对话 ====================
+// ==================== 对话历史 ====================
+
+async function loadConversations() {
+    if (!state.currentKB) return;
+    try {
+        const res = await fetch(`${API}/chat/conversations?knowledge_base_id=${state.currentKB.id}`);
+        const json = await res.json();
+        state.conversations = json.data || [];
+        renderConvList();
+    } catch (e) {
+        console.error("加载对话历史失败:", e);
+    }
+}
+
+function renderConvList() {
+    const container = document.getElementById("conv-list");
+    if (state.conversations.length === 0) {
+        container.innerHTML = '<div class="text-xs text-gray-600 text-center py-4">暂无对话</div>';
+        return;
+    }
+    container.innerHTML = state.conversations.map(conv => `
+        <div class="flex items-center justify-between rounded-lg p-2 cursor-pointer hover:bg-gray-800/50 group ${state.conversationId === conv.id ? 'bg-gray-800/70' : ''}"
+             onclick="selectConversation('${conv.id}')">
+            <div class="min-w-0 flex-1">
+                <div class="text-xs text-gray-300 truncate">${escapeHtml(conv.title || '未命名对话')}</div>
+                <div class="text-xs text-gray-600">${conv.message_count} 条消息</div>
+            </div>
+            <button onclick="event.stopPropagation(); deleteConversation('${conv.id}')" class="text-gray-700 hover:text-red-400 transition opacity-0 group-hover:opacity-100 p-0.5 shrink-0">
+                <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+    `).join("");
+}
+
+async function selectConversation(convId) {
+    state.conversationId = convId;
+    renderConvList();
+    // TODO: load conversation messages and display
+}
+
+function startNewConversation() {
+    clearChat();
+    showToast("已开始新对话", "info");
+}
+
+async function deleteConversation(convId) {
+    try {
+        await fetch(`${API}/chat/conversations/${convId}`, { method: "DELETE" });
+        if (state.conversationId === convId) {
+            state.conversationId = null;
+            clearChat();
+        }
+        await loadConversations();
+        showToast("对话已删除", "success");
+    } catch (e) {
+        showToast("删除失败", "error");
+    }
+}
+
+// ==================== WebSocket ====================
+
+function toggleWebSocket(checkbox) {
+    state.useWebSocket = checkbox.checked;
+    if (state.useWebSocket) {
+        connectWebSocket();
+    } else {
+        disconnectWebSocket();
+    }
+}
+
+function connectWebSocket() {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) return;
+
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${location.host}${API}/ws/chat`;
+
+    state.ws = new WebSocket(wsUrl);
+
+    state.ws.onopen = () => {
+        showToast("WebSocket 已连接", "success");
+        document.getElementById("status-text").textContent = "WebSocket 已连接";
+        document.getElementById("status-dot").className = "w-2 h-2 rounded-full bg-blue-500";
+    };
+
+    state.ws.onclose = () => {
+        document.getElementById("status-text").textContent = "系统就绪";
+        document.getElementById("status-dot").className = "w-2 h-2 rounded-full bg-emerald-500";
+    };
+
+    state.ws.onerror = () => {
+        showToast("WebSocket 连接失败", "error");
+        state.useWebSocket = false;
+        document.getElementById("ws-toggle").checked = false;
+    };
+}
+
+function disconnectWebSocket() {
+    if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+    }
+}
+
+async function sendViaWebSocket(query) {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        showToast("WebSocket 未连接", "error");
+        return;
+    }
+
+    document.getElementById("welcome").classList.add("hidden");
+    document.getElementById("messages").classList.remove("hidden");
+    appendMessage("user", query);
+
+    const assistantEl = appendMessage("assistant", "");
+    const contentEl = assistantEl.querySelector(".msg-content");
+    contentEl.innerHTML = '<div class="dot-pulse"><span></span><span></span><span></span></div>';
+
+    state.isStreaming = true;
+    updateSendButton();
+
+    let fullAnswer = "";
+    let sources = [];
+
+    state.ws.send(JSON.stringify({
+        type: "chat",
+        query: query,
+        knowledge_base_id: state.currentKB.id,
+        conversation_id: state.conversationId,
+    }));
+
+    return new Promise((resolve) => {
+        const handler = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+
+                if (data.type === "retrieval") {
+                    sources = data.documents || [];
+                } else if (data.type === "token") {
+                    fullAnswer += data.content;
+                    contentEl.innerHTML = renderMarkdown(fullAnswer);
+                    contentEl.classList.add("typing-cursor");
+                    scrollToBottom();
+                } else if (data.type === "done") {
+                    state.conversationId = data.conversation_id || state.conversationId;
+                    contentEl.classList.remove("typing-cursor");
+                    contentEl.innerHTML = renderMarkdown(fullAnswer);
+                    if (sources.length > 0) appendSources(assistantEl, sources);
+
+                    state.isStreaming = false;
+                    updateSendButton();
+                    scrollToBottom();
+                    loadConversations();
+
+                    state.ws.removeEventListener("message", handler);
+                    resolve();
+                } else if (data.type === "error") {
+                    contentEl.innerHTML = `<span class="text-red-400">${escapeHtml(data.message)}</span>`;
+                    state.isStreaming = false;
+                    updateSendButton();
+                    state.ws.removeEventListener("message", handler);
+                    resolve();
+                }
+            } catch {}
+        };
+
+        state.ws.addEventListener("message", handler);
+    });
+}
+
+// ==================== 对话（SSE / WebSocket 统一入口） ====================
 
 function toggleStream(checkbox) {
     state.useStream = checkbox.checked;
@@ -245,6 +420,11 @@ async function sendMessage() {
 
     input.value = "";
     autoResize(input);
+
+    if (state.useWebSocket) {
+        await sendViaWebSocket(query);
+        return;
+    }
 
     document.getElementById("welcome").classList.add("hidden");
     document.getElementById("messages").classList.remove("hidden");
@@ -282,6 +462,7 @@ async function sendMessage() {
     state.isStreaming = false;
     updateSendButton();
     scrollToBottom();
+    loadConversations();
 }
 
 async function handleStreamResponse(res, contentEl, assistantEl) {
@@ -409,6 +590,7 @@ function clearChat() {
     document.getElementById("messages").classList.add("hidden");
     document.getElementById("welcome").classList.remove("hidden");
     document.getElementById("token-info").textContent = "";
+    renderConvList();
 }
 
 // ==================== 工具函数 ====================

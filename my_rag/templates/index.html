@@ -53,6 +53,15 @@
         </div>
     </div>
 
+    <!-- 对话历史 -->
+    <div id="conv-section" class="border-t border-gray-800 p-3 hidden">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">对话历史</span>
+            <button onclick="startNewConversation()" class="text-xs text-brand-500 hover:text-brand-400 transition">+ 新对话</button>
+        </div>
+        <div id="conv-list" class="space-y-1 max-h-32 overflow-y-auto"></div>
+    </div>
+
     <!-- 底部状态 -->
     <div class="p-3 border-t border-gray-800 text-xs text-gray-600">
         <div class="flex items-center gap-2">
@@ -70,7 +79,12 @@
             <h2 id="current-kb-name" class="text-sm font-medium text-gray-300">选择一个知识库开始对话</h2>
         </div>
         <div class="flex items-center gap-3">
-            <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300 transition px-2 py-1 rounded hover:bg-gray-800">清空对话</button>
+            <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-gray-500 hover:text-gray-300 transition">
+                <input type="checkbox" id="ws-toggle" onchange="toggleWebSocket(this)"
+                    class="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-brand-600 focus:ring-brand-600/50 focus:ring-offset-0 cursor-pointer">
+                WebSocket
+            </label>
+            <button onclick="clearChat()" class="text-xs text-gray-500 hover:text-gray-300 transition px-2 py-1 rounded hover:bg-gray-800">新对话</button>
             <a href="/api/docs" target="_blank" class="text-xs text-gray-500 hover:text-gray-300 transition px-2 py-1 rounded hover:bg-gray-800">API 文档</a>
         </div>
     </header>

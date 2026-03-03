@@ -72,6 +72,11 @@ class RetrievalSettings(BaseSettings):
 
     top_k: int = 5
     rrf_k: int = 60
+    enable_hyde: bool = False
+    enable_multi_query: bool = False
+    enable_cache: bool = True
+    cache_similarity_threshold: float = 0.92
+    cache_ttl_seconds: int = 3600
 
 
 class ChunkSettings(BaseSettings):

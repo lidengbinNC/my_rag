@@ -1,0 +1,15 @@
+# Prometheus 配置
+# 面试考点：Prometheus 的 pull 模式 — 定时 HTTP GET 抓取目标的 /metrics 端点
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "myrag"
+    metrics_path: "/api/v1/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: "myrag"
+          environment: "dev"

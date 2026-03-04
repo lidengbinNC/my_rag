@@ -8,6 +8,7 @@
 """
 
 import json
+import time
 import uuid
 from datetime import datetime
 
@@ -21,6 +22,7 @@ from my_rag.infrastructure.database import (
     async_session_factory,
 )
 from my_rag.utils.logger import get_logger
+from my_rag.utils.metrics import DOC_PROCESS_DURATION, DOC_CHUNK_COUNT, EMBEDDING_BATCH_SIZE
 
 logger = get_logger(__name__)
 
@@ -42,6 +44,7 @@ async def process_document(document_id: str) -> None:
         doc.status = "processing"
         await session.commit()
 
+        _start = time.perf_counter()
         try:
             parser = ParserFactory.get_parser(doc.filename)
             parsed = parser.parse(doc.file_path)
@@ -142,11 +145,16 @@ async def process_document(document_id: str) -> None:
 
             await session.commit()
 
+            DOC_PROCESS_DURATION.observe(time.perf_counter() - _start)
+            DOC_CHUNK_COUNT.observe(len(text_chunks))
+            EMBEDDING_BATCH_SIZE.observe(len(chunk_texts))
+
             logger.info(
                 "document_processed",
                 document_id=document_id,
                 chunk_count=len(text_chunks),
                 status="completed",
+                duration_s=round(time.perf_counter() - _start, 2),
             )
 
         except Exception as e:

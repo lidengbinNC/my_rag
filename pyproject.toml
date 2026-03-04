@@ -32,6 +32,8 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "openai>=1.30.0",
     "jieba>=0.42.0",
+    # Phase 5: Observability
+    "prometheus-client>=0.20.0",
 ]
 
 [project.optional-dependencies]

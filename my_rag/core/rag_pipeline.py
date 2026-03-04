@@ -17,6 +17,8 @@ from my_rag.domain.retrieval.base import BaseRetriever, RetrievalResult
 from my_rag.domain.retrieval.query_rewriter import QueryRewriter
 from my_rag.core.semantic_cache import SemanticCache
 from my_rag.utils.logger import get_logger
+from my_rag.utils.tracing import Trace
+from my_rag.utils import metrics as prom
 
 logger = get_logger(__name__)
 
@@ -58,31 +60,41 @@ class RAGPipeline:
         top_k: int = 5,
         chat_history: str = "",
     ) -> RAGResponse:
-        """同步执行完整 RAG 流程"""
+        """同步执行完整 RAG 流程（带链路追踪 + Prometheus 指标）"""
+        trace = Trace()
 
-        if self._enable_cache and self._cache:
-            cached = await self._cache.get(query)
-            if cached:
-                return RAGResponse(
-                    answer=cached.answer,
-                    sources=[],
-                    cached=True,
-                )
+        with trace.span("rag_pipeline", query=query[:50]):
 
-        sources = await self._retrieve_with_rewrite(query, top_k, knowledge_base_id)
+            with trace.span("cache_check"):
+                if self._enable_cache and self._cache:
+                    cached = await self._cache.get(query)
+                    if cached:
+                        prom.CACHE_HIT.inc()
+                        return RAGResponse(answer=cached.answer, sources=[], cached=True)
+                    prom.CACHE_MISS.inc()
 
-        logger.info("rag_retrieval_done", query=query[:50], source_count=len(sources))
+            with trace.span("retrieval"):
+                sources = await self._retrieve_with_rewrite(query, top_k, knowledge_base_id)
+                prom.RETRIEVAL_DOCS.observe(len(sources))
 
-        context = self._build_context_from_sources(sources)
-        prompt = build_prompt(question=query, context=context, chat_history=chat_history)
+            logger.info("rag_retrieval_done", query=query[:50], source_count=len(sources))
 
-        answer = await self._llm.generate(prompt)
+            with trace.span("prompt_build"):
+                context = self._build_context_from_sources(sources)
+                prompt = build_prompt(question=query, context=context, chat_history=chat_history)
 
-        logger.info("rag_generation_done", answer_length=len(answer))
+            with trace.span("llm_generate"):
+                answer = await self._llm.generate(prompt)
 
-        if self._enable_cache and self._cache:
-            source_dicts = [{"content": s.content, "source": s.source, "score": s.score} for s in sources]
-            await self._cache.put(query, answer, source_dicts)
+            logger.info("rag_generation_done", answer_length=len(answer))
+
+            with trace.span("cache_store"):
+                if self._enable_cache and self._cache:
+                    source_dicts = [{"content": s.content, "source": s.source, "score": s.score} for s in sources]
+                    await self._cache.put(query, answer, source_dicts)
+                    prom.CACHE_SIZE.set(self._cache.size)
+
+        trace.log_summary()
 
         return RAGResponse(answer=answer, sources=sources, prompt=prompt)
 

@@ -22,7 +22,7 @@ from my_rag.infrastructure.database import (
     async_session_factory,
 )
 from my_rag.utils.logger import get_logger
-from my_rag.utils.metrics import DOC_PROCESS_DURATION, DOC_CHUNK_COUNT, EMBEDDING_BATCH_SIZE
+from my_rag.utils.metrics import DOC_PROCESS_DURATION, DOC_CHUNK_COUNT, EMBEDDING_BATCH_SIZE, VECTOR_STORE_SIZE
 
 logger = get_logger(__name__)
 
@@ -118,6 +118,7 @@ async def process_document(document_id: str) -> None:
                 texts=chunk_texts,
                 metadatas=chunk_metadatas,
             )
+            VECTOR_STORE_SIZE.set(vector_store.count())
 
             # 更新 BM25 索引（需要重建全量索引）
             await _rebuild_bm25_index(session, sparse_retriever)

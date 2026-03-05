@@ -8,6 +8,7 @@ RAG Pipeline 编排器（Phase 4 升级版）
 - 流式输出：AsyncIterator 逐 token 传递给前端
 """
 
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
@@ -52,6 +53,7 @@ class RAGPipeline:
         self._enable_hyde = enable_hyde
         self._enable_multi_query = enable_multi_query
         self._enable_cache = enable_cache and semantic_cache is not None
+        self._retriever_type = type(retriever).__name__.lower().replace("retriever", "")
 
     async def run(
         self,
@@ -74,7 +76,11 @@ class RAGPipeline:
                     prom.CACHE_MISS.inc()
 
             with trace.span("retrieval"):
+                _ret_start = time.perf_counter()
                 sources = await self._retrieve_with_rewrite(query, top_k, knowledge_base_id)
+                _ret_dur = time.perf_counter() - _ret_start
+                prom.RETRIEVAL_COUNT.labels(retriever_type=self._retriever_type).inc()
+                prom.RETRIEVAL_DURATION.labels(retriever_type=self._retriever_type).observe(_ret_dur)
                 prom.RETRIEVAL_DOCS.observe(len(sources))
 
             logger.info("rag_retrieval_done", query=query[:50], source_count=len(sources))
@@ -84,7 +90,9 @@ class RAGPipeline:
                 prompt = build_prompt(question=query, context=context, chat_history=chat_history)
 
             with trace.span("llm_generate"):
+                _llm_start = time.perf_counter()
                 answer = await self._llm.generate(prompt)
+                prom.LLM_DURATION.observe(time.perf_counter() - _llm_start)
 
             logger.info("rag_generation_done", answer_length=len(answer))
 
@@ -110,12 +118,19 @@ class RAGPipeline:
         if self._enable_cache and self._cache:
             cached = await self._cache.get(query)
             if cached:
+                prom.CACHE_HIT.inc()
                 yield {"type": "retrieval", "documents": cached.sources}
                 yield {"type": "token", "content": cached.answer}
                 yield {"type": "done", "full_answer": cached.answer, "sources": cached.sources, "cached": True}
                 return
+            prom.CACHE_MISS.inc()
 
+        _ret_start = time.perf_counter()
         sources = await self._retrieve_with_rewrite(query, top_k, knowledge_base_id)
+        _ret_dur = time.perf_counter() - _ret_start
+        prom.RETRIEVAL_COUNT.labels(retriever_type=self._retriever_type).inc()
+        prom.RETRIEVAL_DURATION.labels(retriever_type=self._retriever_type).observe(_ret_dur)
+        prom.RETRIEVAL_DOCS.observe(len(sources))
 
         yield {
             "type": "retrieval",
@@ -129,13 +144,16 @@ class RAGPipeline:
         prompt = build_prompt(question=query, context=context, chat_history=chat_history)
 
         full_answer = ""
+        _llm_start = time.perf_counter()
         async for token in self._llm.stream_generate(prompt):
             full_answer += token
             yield {"type": "token", "content": token}
+        prom.LLM_DURATION.observe(time.perf_counter() - _llm_start)
 
         if self._enable_cache and self._cache:
             source_dicts = [{"content": s.content, "source": s.source, "score": s.score} for s in sources]
             await self._cache.put(query, full_answer, source_dicts)
+            prom.CACHE_SIZE.set(self._cache.size)
 
         yield {
             "type": "done",

@@ -656,20 +656,32 @@ function switchView(view) {
     state.currentView = view;
     document.getElementById("tab-chat").classList.toggle("active", view === "chat");
     document.getElementById("tab-eval").classList.toggle("active", view === "eval");
+    document.getElementById("tab-metrics").classList.toggle("active", view === "metrics");
 
     const chatArea = document.getElementById("chat-area");
     const evalPanel = document.getElementById("eval-panel");
+    const metricsPanel = document.getElementById("metrics-panel");
     const inputArea = document.getElementById("chat-input-area");
+
+    chatArea.classList.add("hidden");
+    evalPanel.classList.add("hidden");
+    metricsPanel.classList.add("hidden");
+    inputArea.classList.add("hidden");
 
     if (view === "chat") {
         chatArea.classList.remove("hidden");
-        evalPanel.classList.add("hidden");
         inputArea.classList.remove("hidden");
-    } else {
-        chatArea.classList.add("hidden");
+    } else if (view === "eval") {
         evalPanel.classList.remove("hidden");
-        inputArea.classList.add("hidden");
         loadSavedDatasets();
+    } else if (view === "metrics") {
+        metricsPanel.classList.remove("hidden");
+        fetchAndRenderMetrics();
+        startMetricsAutoRefresh();
+    }
+
+    if (view !== "metrics") {
+        stopMetricsAutoRefresh();
     }
 
     updateEvalButtons();
@@ -1156,6 +1168,274 @@ function scorePill(score) {
     const pct = (score * 100).toFixed(1);
     const tier = score >= 0.7 ? "high" : score >= 0.4 ? "mid" : "low";
     return `<span class="score-pill ${tier}">${pct}%</span>`;
+}
+
+// ==================== 监控面板 ====================
+
+let _metricsTimer = null;
+
+function parsePrometheusText(text) {
+    const metrics = {};
+    for (const line of text.split("\n")) {
+        if (!line || line.startsWith("#")) continue;
+        const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*?)(\{.*?\})?\s+(.+?)(\s+\d+)?$/);
+        if (!match) continue;
+        const name = match[1];
+        const labels = match[2] || "";
+        const value = parseFloat(match[3]);
+        if (!metrics[name]) metrics[name] = [];
+        const labelObj = {};
+        if (labels) {
+            for (const m of labels.slice(1, -1).matchAll(/(\w+)="([^"]*)"/g)) {
+                labelObj[m[1]] = m[2];
+            }
+        }
+        metrics[name].push({ labels: labelObj, value });
+    }
+    return metrics;
+}
+
+function getMetricValue(metrics, name, labelFilter) {
+    const entries = metrics[name];
+    if (!entries) return 0;
+    if (!labelFilter) return entries[0]?.value || 0;
+    const found = entries.find(e =>
+        Object.entries(labelFilter).every(([k, v]) => e.labels[k] === v)
+    );
+    return found?.value || 0;
+}
+
+function sumMetric(metrics, name, labelFilter) {
+    const entries = metrics[name];
+    if (!entries) return 0;
+    if (!labelFilter) return entries.reduce((s, e) => s + e.value, 0);
+    return entries
+        .filter(e => Object.entries(labelFilter).every(([k, v]) => e.labels[k] === v))
+        .reduce((s, e) => s + e.value, 0);
+}
+
+function fmtNum(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+    if (Number.isInteger(n)) return n.toString();
+    return n.toFixed(2);
+}
+
+function buildMonCard(label, value, sub, color) {
+    return `
+        <div class="mon-card ${color}">
+            <div class="mon-card-label">${label}</div>
+            <div class="mon-card-value">${value}</div>
+            ${sub ? `<div class="mon-card-sub">${sub}</div>` : ""}
+        </div>
+    `;
+}
+
+function buildHitRateCard(label, rate, hits, misses, color) {
+    const pct = isNaN(rate) ? 0 : rate;
+    return `
+        <div class="mon-card ${color}">
+            <div class="mon-card-label">${label}</div>
+            <div class="mon-card-value">${pct.toFixed(1)}%</div>
+            <div class="mon-hit-bar"><div class="mon-hit-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+            <div class="mon-card-sub">命中 ${fmtNum(hits)} / 未命中 ${fmtNum(misses)}</div>
+        </div>
+    `;
+}
+
+async function fetchAndRenderMetrics() {
+    try {
+        const res = await fetch(`${API}/metrics`);
+        const text = await res.text();
+        const m = parsePrometheusText(text);
+
+        renderRequestMetrics(m);
+        renderRAGMetrics(m);
+        renderDocMetrics(m);
+        renderSystemMetrics(m);
+
+        document.getElementById("raw-metrics-content").textContent = text;
+
+        const now = new Date();
+        document.getElementById("metrics-update-time").textContent =
+            `最后更新: ${now.toLocaleTimeString("zh-CN")}`;
+    } catch (e) {
+        document.getElementById("metrics-update-time").textContent = `加载失败: ${e.message}`;
+    }
+}
+
+function renderRequestMetrics(m) {
+    const totalReq = sumMetric(m, "rag_request_total");
+    const totalReqCreated = sumMetric(m, "rag_request_total_created");
+    const durationSum = sumMetric(m, "rag_request_duration_seconds_sum");
+    const durationCount = sumMetric(m, "rag_request_duration_seconds_count");
+    const avgLatency = durationCount > 0 ? (durationSum / durationCount * 1000) : 0;
+
+    const p95Bucket = estimatePercentile(m, "rag_request_duration_seconds_bucket", 0.95);
+
+    const statusOK = m["rag_request_total"]
+        ?.filter(e => e.labels.status_code?.startsWith("2"))
+        .reduce((s, e) => s + e.value, 0) || 0;
+    const statusErr = totalReq - statusOK;
+
+    document.getElementById("metrics-request").innerHTML = [
+        buildMonCard("总请求数", fmtNum(totalReq), `成功 ${fmtNum(statusOK)} / 错误 ${fmtNum(statusErr)}`, "blue"),
+        buildMonCard("平均延迟", avgLatency > 0 ? avgLatency.toFixed(0) + "ms" : "N/A", `共 ${fmtNum(durationCount)} 次采样`, "cyan"),
+        buildMonCard("P95 延迟", p95Bucket > 0 ? (p95Bucket * 1000).toFixed(0) + "ms" : "N/A", "第95百分位估算", "purple"),
+        buildMonCard("错误数", fmtNum(statusErr), statusErr > 0 ? `错误率 ${(statusErr / Math.max(totalReq, 1) * 100).toFixed(1)}%` : "无错误", statusErr > 0 ? "rose" : "emerald"),
+    ].join("");
+}
+
+function renderRAGMetrics(m) {
+    const cacheHit = sumMetric(m, "rag_cache_hit_total");
+    const cacheMiss = sumMetric(m, "rag_cache_miss_total");
+    const cacheTotal = cacheHit + cacheMiss;
+    const hitRate = cacheTotal > 0 ? (cacheHit / cacheTotal * 100) : 0;
+    const cacheSize = getMetricValue(m, "rag_cache_size");
+
+    const retrievalDocsSum = sumMetric(m, "rag_retrieval_documents_sum");
+    const retrievalDocsCount = sumMetric(m, "rag_retrieval_documents_count");
+    const avgDocs = retrievalDocsCount > 0 ? (retrievalDocsSum / retrievalDocsCount) : 0;
+
+    document.getElementById("metrics-rag").innerHTML = [
+        buildHitRateCard("缓存命中率", hitRate, cacheHit, cacheMiss, "emerald"),
+        buildMonCard("缓存大小", fmtNum(cacheSize), "当前缓存条目数", "teal"),
+        buildMonCard("检索次数", fmtNum(retrievalDocsCount), `平均返回 ${avgDocs.toFixed(1)} 篇文档`, "purple"),
+        buildMonCard("LLM Token", fmtNum(sumMetric(m, "rag_llm_token_total")), `Prompt + Completion`, "indigo"),
+    ].join("");
+}
+
+function renderDocMetrics(m) {
+    const docCount = sumMetric(m, "rag_document_processing_seconds_count");
+    const docSum = sumMetric(m, "rag_document_processing_seconds_sum");
+    const avgDocTime = docCount > 0 ? (docSum / docCount) : 0;
+
+    const chunkCount = sumMetric(m, "rag_document_chunk_count_count");
+    const chunkSum = sumMetric(m, "rag_document_chunk_count_sum");
+    const avgChunks = chunkCount > 0 ? (chunkSum / chunkCount) : 0;
+
+    const embedCount = sumMetric(m, "rag_embedding_batch_size_count");
+    const embedSum = sumMetric(m, "rag_embedding_batch_size_sum");
+    const avgBatch = embedCount > 0 ? (embedSum / embedCount) : 0;
+
+    document.getElementById("metrics-doc").innerHTML = [
+        buildMonCard("已处理文档", fmtNum(docCount), docCount > 0 ? `总耗时 ${docSum.toFixed(1)}s` : "暂无数据", "amber"),
+        buildMonCard("平均处理耗时", avgDocTime > 0 ? avgDocTime.toFixed(1) + "s" : "N/A", `共 ${fmtNum(docCount)} 篇`, "blue"),
+        buildMonCard("平均分块数", avgChunks > 0 ? avgChunks.toFixed(0) : "N/A", `共 ${fmtNum(chunkSum)} 块`, "purple"),
+        buildMonCard("平均 Embed 批次", avgBatch > 0 ? avgBatch.toFixed(0) : "N/A", `共 ${fmtNum(embedCount)} 次`, "cyan"),
+    ].join("");
+}
+
+function renderSystemMetrics(m) {
+    const wsConn = getMetricValue(m, "rag_active_websocket_connections");
+    const vectorSize = getMetricValue(m, "rag_vector_store_size");
+
+    const evalEntries = m["rag_evaluation_score"] || [];
+    const evalCards = [
+        { label: "忠实度", key: "faithfulness", color: "emerald" },
+        { label: "相关性", key: "answer_relevancy", color: "blue" },
+        { label: "召回率", key: "context_recall", color: "purple" },
+        { label: "正确性", key: "answer_correctness", color: "amber" },
+    ];
+
+    let html = [
+        buildMonCard("WebSocket 连接", fmtNum(wsConn), "当前活跃连接数", "cyan"),
+        buildMonCard("向量数量", fmtNum(vectorSize), "FAISS 索引", "indigo"),
+    ];
+
+    for (const ec of evalCards) {
+        const val = evalEntries.find(e => e.labels.metric === ec.key)?.value || 0;
+        const pct = (val * 100).toFixed(1);
+        html.push(buildMonCard(`评估: ${ec.label}`, val > 0 ? pct + "%" : "N/A", "最近一次评估", ec.color));
+    }
+
+    document.getElementById("metrics-system").innerHTML = html.join("");
+}
+
+function estimatePercentile(metrics, bucketName, percentile) {
+    const entries = metrics[bucketName];
+    if (!entries || entries.length === 0) return 0;
+
+    const grouped = {};
+    for (const e of entries) {
+        const key = Object.entries(e.labels)
+            .filter(([k]) => k !== "le")
+            .map(([k, v]) => `${k}=${v}`)
+            .join(",");
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(e);
+    }
+
+    let totalCount = 0;
+    let allBuckets = [];
+
+    for (const buckets of Object.values(grouped)) {
+        buckets.sort((a, b) => parseFloat(a.labels.le) - parseFloat(b.labels.le));
+        for (const b of buckets) {
+            const le = b.labels.le === "+Inf" ? Infinity : parseFloat(b.labels.le);
+            allBuckets.push({ le, count: b.value });
+        }
+        const inf = buckets.find(b => b.labels.le === "+Inf");
+        if (inf) totalCount += inf.value;
+    }
+
+    if (totalCount === 0) return 0;
+
+    allBuckets.sort((a, b) => a.le - b.le);
+
+    const mergedBuckets = [];
+    for (const b of allBuckets) {
+        const existing = mergedBuckets.find(mb => mb.le === b.le);
+        if (existing) existing.count += b.count;
+        else mergedBuckets.push({ ...b });
+    }
+
+    const target = percentile * totalCount;
+    let prev = { le: 0, count: 0 };
+    for (const b of mergedBuckets) {
+        if (b.count >= target) {
+            if (b.le === Infinity) return prev.le;
+            const fraction = (target - prev.count) / Math.max(b.count - prev.count, 1);
+            return prev.le + fraction * (b.le - prev.le);
+        }
+        prev = b;
+    }
+    return prev.le;
+}
+
+function toggleRawMetrics() {
+    const content = document.getElementById("raw-metrics-content");
+    const btn = document.getElementById("raw-metrics-toggle");
+    if (content.classList.contains("hidden")) {
+        content.classList.remove("hidden");
+        btn.textContent = "收起";
+    } else {
+        content.classList.add("hidden");
+        btn.textContent = "展开";
+    }
+}
+
+function startMetricsAutoRefresh() {
+    stopMetricsAutoRefresh();
+    const checkbox = document.getElementById("metrics-auto-refresh");
+    if (checkbox && checkbox.checked) {
+        _metricsTimer = setInterval(fetchAndRenderMetrics, 10000);
+    }
+}
+
+function stopMetricsAutoRefresh() {
+    if (_metricsTimer) {
+        clearInterval(_metricsTimer);
+        _metricsTimer = null;
+    }
+}
+
+function toggleMetricsAutoRefresh(checkbox) {
+    if (checkbox.checked && state.currentView === "metrics") {
+        startMetricsAutoRefresh();
+    } else {
+        stopMetricsAutoRefresh();
+    }
 }
 
 // ==================== Toast ====================

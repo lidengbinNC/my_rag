@@ -25,6 +25,7 @@ from my_rag.infrastructure.database import (
     async_session_factory,
 )
 from my_rag.utils.logger import get_logger
+from my_rag.utils.metrics import ACTIVE_WEBSOCKETS
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -39,10 +40,13 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
         self.active_connections[client_id] = websocket
+        ACTIVE_WEBSOCKETS.inc()
         logger.info("ws_connected", client_id=client_id, total=len(self.active_connections))
 
     def disconnect(self, client_id: str):
-        self.active_connections.pop(client_id, None)
+        if client_id in self.active_connections:
+            self.active_connections.pop(client_id)
+            ACTIVE_WEBSOCKETS.dec()
         logger.info("ws_disconnected", client_id=client_id, total=len(self.active_connections))
 
     async def send_json(self, client_id: str, data: dict):

@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 
 from my_rag.domain.llm.base import BaseLLM
 from my_rag.utils.logger import get_logger
+from my_rag.utils.metrics import LLM_TOKEN_USAGE
 
 logger = get_logger(__name__)
 
@@ -48,6 +49,9 @@ class OpenAILLM(BaseLLM):
             temperature=kwargs.get("temperature", self._temperature),
             stream=False,
         )
+        if response.usage:
+            LLM_TOKEN_USAGE.labels(type="prompt").inc(response.usage.prompt_tokens)
+            LLM_TOKEN_USAGE.labels(type="completion").inc(response.usage.completion_tokens)
         return response.choices[0].message.content or ""
 
     async def stream_generate(self, prompt: str, **kwargs) -> AsyncIterator[str]:
@@ -58,8 +62,11 @@ class OpenAILLM(BaseLLM):
             max_tokens=kwargs.get("max_tokens", self._max_tokens),
             temperature=kwargs.get("temperature", self._temperature),
             stream=True,
+            stream_options={"include_usage": True},
         )
         async for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta.content:
-                yield delta.content
+            if chunk.usage:
+                LLM_TOKEN_USAGE.labels(type="prompt").inc(chunk.usage.prompt_tokens)
+                LLM_TOKEN_USAGE.labels(type="completion").inc(chunk.usage.completion_tokens)
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content

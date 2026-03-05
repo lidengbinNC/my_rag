@@ -83,6 +83,7 @@
             <div class="flex bg-gray-800 rounded-lg p-0.5">
                 <button id="tab-chat" onclick="switchView('chat')" class="view-tab active text-xs px-3 py-1 rounded-md transition">对话</button>
                 <button id="tab-eval" onclick="switchView('eval')" class="view-tab text-xs px-3 py-1 rounded-md transition">评估</button>
+                <button id="tab-metrics" onclick="switchView('metrics')" class="view-tab text-xs px-3 py-1 rounded-md transition">监控</button>
             </div>
             <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-gray-500 hover:text-gray-300 transition">
                 <input type="checkbox" id="ws-toggle" onchange="toggleWebSocket(this)"
@@ -272,6 +273,83 @@
                 </div>
             </div>
 
+        </div>
+    </div>
+
+    <!-- ========== 监控面板 ========== -->
+    <div id="metrics-panel" class="flex-1 overflow-y-auto p-5 hidden">
+        <div class="max-w-6xl mx-auto space-y-5">
+            <!-- 头部 -->
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-lg bg-cyan-600/20 flex items-center justify-center">
+                        <svg class="w-4.5 h-4.5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                    </div>
+                    <div>
+                        <h3 class="text-sm font-semibold text-white">Prometheus 监控面板</h3>
+                        <p class="text-xs text-gray-500" id="metrics-update-time">尚未加载</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-gray-500 hover:text-gray-300 transition">
+                        <input type="checkbox" id="metrics-auto-refresh" checked onchange="toggleMetricsAutoRefresh(this)"
+                            class="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-cyan-600 focus:ring-cyan-600/50 focus:ring-offset-0 cursor-pointer">
+                        自动刷新 (10s)
+                    </label>
+                    <button onclick="fetchAndRenderMetrics()" class="text-xs text-gray-500 hover:text-gray-300 transition px-2.5 py-1.5 rounded-lg hover:bg-gray-800 border border-gray-700/50 flex items-center gap-1.5">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                        刷新
+                    </button>
+                </div>
+            </div>
+
+            <!-- 请求指标 -->
+            <div class="mon-section">
+                <div class="mon-section-title">
+                    <svg class="w-4 h-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    请求指标
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3" id="metrics-request"></div>
+            </div>
+
+            <!-- RAG Pipeline -->
+            <div class="mon-section">
+                <div class="mon-section-title">
+                    <svg class="w-4 h-4 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
+                    RAG Pipeline
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3" id="metrics-rag"></div>
+            </div>
+
+            <!-- 文档处理 -->
+            <div class="mon-section">
+                <div class="mon-section-title">
+                    <svg class="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    文档处理
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3" id="metrics-doc"></div>
+            </div>
+
+            <!-- 系统 & 评估 -->
+            <div class="mon-section">
+                <div class="mon-section-title">
+                    <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/></svg>
+                    系统 & 评估
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3" id="metrics-system"></div>
+            </div>
+
+            <!-- 原始指标 -->
+            <div class="mon-section">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="mon-section-title mb-0">
+                        <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+                        原始 OpenMetrics
+                    </div>
+                    <button onclick="toggleRawMetrics()" class="text-xs text-gray-500 hover:text-gray-300 transition px-2 py-1 rounded hover:bg-gray-800" id="raw-metrics-toggle">展开</button>
+                </div>
+                <pre id="raw-metrics-content" class="hidden bg-gray-950 border border-gray-800 rounded-xl p-4 text-xs text-gray-400 font-mono overflow-x-auto max-h-80 overflow-y-auto whitespace-pre-wrap"></pre>
+            </div>
         </div>
     </div>
 

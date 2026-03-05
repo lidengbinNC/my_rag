@@ -238,6 +238,17 @@ class RAGEvaluator:
         return result
 
     @staticmethod
+    def _normalize_score(raw: float) -> float:
+        """将分数归一化到 [0, 1] 区间
+
+        LLM 有时返回百分制 (e.g. 85.0) 而非小数 (e.g. 0.85)，
+        这里统一处理：> 1.0 的值视为百分制，除以 100。
+        """
+        if raw > 1.0:
+            raw = raw / 100.0
+        return max(0.0, min(1.0, raw))
+
+    @staticmethod
     def _extract_score(llm_output: str) -> float:
         """从 LLM 输出中提取 score 字段"""
         import json
@@ -246,10 +257,12 @@ class RAGEvaluator:
             json_match = re.search(r'\{[^}]+\}', llm_output)
             if json_match:
                 data = json.loads(json_match.group())
-                return float(data.get("score", 0.0))
+                raw = float(data.get("score", 0.0))
+                return RAGEvaluator._normalize_score(raw)
         except (json.JSONDecodeError, ValueError):
             pass
         score_match = re.search(r'score["\s:]+(\d+\.?\d*)', llm_output, re.IGNORECASE)
         if score_match:
-            return min(1.0, float(score_match.group(1)))
+            raw = float(score_match.group(1))
+            return RAGEvaluator._normalize_score(raw)
         return 0.0

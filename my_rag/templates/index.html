@@ -79,6 +79,11 @@
             <h2 id="current-kb-name" class="text-sm font-medium text-gray-300">选择一个知识库开始对话</h2>
         </div>
         <div class="flex items-center gap-3">
+            <!-- 视图切换 -->
+            <div class="flex bg-gray-800 rounded-lg p-0.5">
+                <button id="tab-chat" onclick="switchView('chat')" class="view-tab active text-xs px-3 py-1 rounded-md transition">对话</button>
+                <button id="tab-eval" onclick="switchView('eval')" class="view-tab text-xs px-3 py-1 rounded-md transition">评估</button>
+            </div>
             <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-gray-500 hover:text-gray-300 transition">
                 <input type="checkbox" id="ws-toggle" onchange="toggleWebSocket(this)"
                     class="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-brand-600 focus:ring-brand-600/50 focus:ring-offset-0 cursor-pointer">
@@ -123,8 +128,155 @@
         <div id="messages" class="space-y-6 max-w-4xl mx-auto hidden"></div>
     </div>
 
+    <!-- ========== 评估面板 ========== -->
+    <div id="eval-panel" class="flex-1 overflow-y-auto p-5 hidden">
+        <div class="max-w-5xl mx-auto space-y-6">
+
+            <!-- 已有数据集 -->
+            <div class="eval-card bg-gray-900 border border-gray-800 rounded-2xl p-5">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-3">
+                        <div class="w-7 h-7 rounded-lg bg-emerald-600/20 flex items-center justify-center">
+                            <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-semibold text-white">已有数据集</h3>
+                            <p class="text-xs text-gray-500 mt-0.5" id="saved-datasets-info">加载中...</p>
+                        </div>
+                    </div>
+                    <button onclick="loadSavedDatasets()" class="text-xs text-gray-500 hover:text-gray-300 transition px-2 py-1 rounded hover:bg-gray-800">
+                        <svg class="w-3.5 h-3.5 inline-block mr-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                        刷新
+                    </button>
+                </div>
+                <div id="saved-datasets-list" class="space-y-1.5">
+                    <div class="text-xs text-gray-600 text-center py-4">暂无已保存的数据集</div>
+                </div>
+            </div>
+
+            <!-- 步骤 1：生成数据集 -->
+            <div class="eval-card bg-gray-900 border border-gray-800 rounded-2xl p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <span class="eval-step-badge">1</span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-white">生成评估数据集</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">从知识库 Chunk 中使用 LLM 自动生成 QA 测试对</p>
+                        </div>
+                    </div>
+                    <button id="gen-dataset-btn" onclick="generateDataset()" disabled
+                        class="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-lg text-xs font-medium transition flex items-center gap-2">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                        生成
+                    </button>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">每 Chunk 问题数</label>
+                        <input id="gen-qpc" type="number" value="2" min="1" max="10"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-600">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">最大 Chunk 数</label>
+                        <input id="gen-max" type="number" value="20" min="1" max="500"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-600">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">采样策略</label>
+                        <select id="gen-strategy"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-600">
+                            <option value="diverse">多样性采样</option>
+                            <option value="random">随机采样</option>
+                            <option value="sequential">顺序采样</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">数据集名称</label>
+                        <input id="gen-name" type="text" placeholder="留空自动生成"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-600">
+                    </div>
+                </div>
+            </div>
+
+            <!-- 步骤 2：数据集预览 -->
+            <div class="eval-card bg-gray-900 border border-gray-800 rounded-2xl p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <span class="eval-step-badge">2</span>
+                        <div>
+                            <h3 class="text-sm font-semibold text-white">数据集预览</h3>
+                            <p class="text-xs text-gray-500 mt-0.5" id="dataset-info">尚未生成数据集</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="addManualSample()" class="px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 rounded-lg transition">+ 手动添加</button>
+                        <button id="run-batch-btn" onclick="runBatchEval()" disabled
+                            class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-lg text-xs font-medium transition flex items-center gap-2">
+                            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            运行批量评估
+                        </button>
+                    </div>
+                </div>
+                <div id="dataset-table-wrap" class="hidden">
+                    <div class="overflow-x-auto max-h-64 overflow-y-auto rounded-lg border border-gray-800">
+                        <table class="w-full text-xs">
+                            <thead class="bg-gray-800/80 sticky top-0">
+                                <tr>
+                                    <th class="text-left px-3 py-2 text-gray-400 font-medium w-8">#</th>
+                                    <th class="text-left px-3 py-2 text-gray-400 font-medium">问题</th>
+                                    <th class="text-left px-3 py-2 text-gray-400 font-medium">标准答案</th>
+                                    <th class="text-center px-3 py-2 text-gray-400 font-medium w-20">状态</th>
+                                    <th class="text-center px-3 py-2 text-gray-400 font-medium w-28">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dataset-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div id="dataset-empty" class="text-center py-8 text-xs text-gray-600">
+                    在上方生成数据集，或手动添加评估样本
+                </div>
+            </div>
+
+            <!-- 步骤 3：评估结果 -->
+            <div id="eval-results-section" class="eval-card bg-gray-900 border border-gray-800 rounded-2xl p-5 hidden">
+                <div class="flex items-center gap-3 mb-4">
+                    <span class="eval-step-badge eval-step-done">3</span>
+                    <div>
+                        <h3 class="text-sm font-semibold text-white">评估结果</h3>
+                        <p class="text-xs text-gray-500 mt-0.5" id="eval-result-info"></p>
+                    </div>
+                </div>
+
+                <!-- 汇总指标卡片 -->
+                <div id="eval-summary" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                </div>
+
+                <!-- 详细结果表格 -->
+                <div class="overflow-x-auto max-h-80 overflow-y-auto rounded-lg border border-gray-800">
+                    <table class="w-full text-xs">
+                        <thead class="bg-gray-800/80 sticky top-0">
+                            <tr>
+                                <th class="text-left px-3 py-2 text-gray-400 font-medium w-8">#</th>
+                                <th class="text-left px-3 py-2 text-gray-400 font-medium">问题</th>
+                                <th class="text-left px-3 py-2 text-gray-400 font-medium">RAG 回答</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-20">忠实度</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-20">相关性</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-20">召回率</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-20">正确性</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-20">综合</th>
+                            </tr>
+                        </thead>
+                        <tbody id="eval-results-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
     <!-- 输入区域 -->
-    <div class="border-t border-gray-800 p-4 bg-gray-900/50 backdrop-blur shrink-0">
+    <div id="chat-input-area" class="border-t border-gray-800 p-4 bg-gray-900/50 backdrop-blur shrink-0">
         <div class="max-w-4xl mx-auto">
             <div class="flex gap-3 items-end">
                 <div class="flex-1 relative">
@@ -184,6 +336,68 @@
         <div class="flex justify-end gap-3 mt-6">
             <button onclick="hideCreateKBModal()" class="px-4 py-2 text-sm text-gray-400 hover:text-white transition">取消</button>
             <button onclick="createKnowledgeBase()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 rounded-lg text-sm font-medium transition">创建</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 单条评估详情 Modal ========== -->
+<div id="eval-detail-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6 shadow-2xl">
+        <div class="flex items-center justify-between mb-5">
+            <h3 class="text-lg font-semibold text-white">单条评估详情</h3>
+            <button onclick="hideEvalDetailModal()" class="text-gray-500 hover:text-white transition">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+
+        <!-- 指标卡片 -->
+        <div id="detail-scores" class="grid grid-cols-5 gap-2 mb-5"></div>
+
+        <!-- 问题 -->
+        <div class="mb-4">
+            <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">问题</div>
+            <div id="detail-question" class="bg-gray-800 rounded-lg px-4 py-3 text-sm text-gray-200"></div>
+        </div>
+
+        <!-- RAG 回答 -->
+        <div class="mb-4">
+            <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">RAG 回答</div>
+            <div id="detail-answer" class="bg-gray-800 rounded-lg px-4 py-3 text-sm text-gray-200 markdown-body"></div>
+        </div>
+
+        <!-- 标准答案 -->
+        <div id="detail-gt-section" class="mb-4">
+            <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">标准答案 (Ground Truth)</div>
+            <div id="detail-ground-truth" class="bg-gray-800 rounded-lg px-4 py-3 text-sm text-gray-300"></div>
+        </div>
+
+        <!-- 检索上下文 -->
+        <div id="detail-ctx-section">
+            <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">检索上下文</div>
+            <div id="detail-contexts" class="space-y-2"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 手动添加样本 Modal ========== -->
+<div id="add-sample-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg p-6 shadow-2xl">
+        <h3 class="text-lg font-semibold text-white mb-4">添加评估样本</h3>
+        <div class="space-y-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">问题 <span class="text-red-400">*</span></label>
+                <textarea id="sample-question" rows="2" placeholder="输入评估问题..."
+                    class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-600 resize-none"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">标准答案（Ground Truth）</label>
+                <textarea id="sample-ground-truth" rows="3" placeholder="输入期望的标准答案（可选）..."
+                    class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-600 resize-none"></textarea>
+            </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-6">
+            <button onclick="hideAddSampleModal()" class="px-4 py-2 text-sm text-gray-400 hover:text-white transition">取消</button>
+            <button onclick="confirmAddSample()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 rounded-lg text-sm font-medium transition">添加</button>
         </div>
     </div>
 </div>

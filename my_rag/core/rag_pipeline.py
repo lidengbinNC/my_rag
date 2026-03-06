@@ -2,7 +2,7 @@
 RAG Pipeline 编排器（Phase 4 升级版 + Self-RAG）
 
 面试考点：
-- Pipeline 模式：Query → (Cache Check) → (Rewrite) → Retrieve → (Rerank) → Generate → (Cache Store)
+- Pipeline 模式：Query → (Cache Check) → (Rewrite) → Retrieve → (Rerank 精排) → Generate → (Cache Store)
 - 各环节可独立开关：通过配置决定是否启用 HyDE / Multi-Query / Cache / Self-RAG
 - Parent-Child 策略：检索命中 child chunk 时，返回 parent_content 给 LLM
 - 流式输出：AsyncIterator 逐 token 传递给前端
@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from my_rag.domain.llm.base import BaseLLM
 from my_rag.domain.prompt.template import build_context, build_prompt
+from my_rag.domain.reranker.base import BaseReranker
 from my_rag.domain.retrieval.base import BaseRetriever, RetrievalResult
 from my_rag.domain.retrieval.query_rewriter import QueryRewriter
 from my_rag.core.semantic_cache import SemanticCache
@@ -73,7 +74,7 @@ class RAGResponse:
 
 
 class RAGPipeline:
-    """RAG Pipeline：(Self-RAG 判断) → (Cache) → (Rewrite) → Retrieve → (相关性过滤) → Prompt → Generate → (支撑性检查) → (Cache Store)"""
+    """RAG Pipeline：(Self-RAG 判断) → (Cache) → (Rewrite) → Retrieve → (Rerank) → (相关性过滤) → Prompt → Generate → (支撑性检查) → (Cache Store)"""
 
     def __init__(
         self,
@@ -81,22 +82,27 @@ class RAGPipeline:
         llm: BaseLLM,
         query_rewriter: QueryRewriter | None = None,
         semantic_cache: SemanticCache | None = None,
+        reranker: BaseReranker | None = None,
         enable_hyde: bool = False,
         enable_multi_query: bool = False,
         enable_cache: bool = True,
         enable_self_rag: bool = False,
         self_rag_max_retries: int = 1,
+        rerank_top_k: int = 5,
     ):
         self._retriever = retriever
         self._llm = llm
         self._rewriter = query_rewriter
         self._cache = semantic_cache
+        self._reranker = reranker
         self._enable_hyde = enable_hyde
         self._enable_multi_query = enable_multi_query
         self._enable_cache = enable_cache and semantic_cache is not None
         self._enable_self_rag = enable_self_rag
         self._self_rag_max_retries = self_rag_max_retries
+        self._rerank_top_k = rerank_top_k
         self._retriever_type = type(retriever).__name__.lower().replace("retriever", "")
+        self._reranker_type = type(reranker).__name__.lower().replace("reranker", "") if reranker else ""
 
     async def run(
         self,
@@ -142,6 +148,30 @@ class RAGPipeline:
                 prom.RETRIEVAL_DOCS.observe(len(sources))
 
             logger.info("rag_retrieval_done", query=query[:50], source_count=len(sources))
+
+            # ── Rerank：精排 ──
+            if self._reranker and sources:
+                with trace.span("rerank"):
+                    _rerank_start = time.perf_counter()
+                    rerank_results = await self._reranker.rerank(
+                        query, sources, top_k=self._rerank_top_k,
+                    )
+                    _rerank_dur = time.perf_counter() - _rerank_start
+                    prom.RERANK_DURATION.labels(reranker_type=self._reranker_type).observe(_rerank_dur)
+                    prom.RERANK_INPUT_DOCS.observe(len(sources))
+                    prom.RERANK_OUTPUT_DOCS.observe(len(rerank_results))
+                    sources = [
+                        RetrievalResult(
+                            chunk_id=rr.chunk_id, content=rr.content,
+                            score=rr.score, source=rr.source, metadata=rr.metadata or {},
+                        )
+                        for rr in rerank_results
+                    ]
+                logger.info(
+                    "rag_rerank_done",
+                    input_count=len(sources) + len(rerank_results) - len(sources),
+                    output_count=len(sources),
+                )
 
             # ── Self-RAG 第 2 层：相关性过滤 ──
             relevant_sources = None
@@ -244,6 +274,25 @@ class RAGPipeline:
         prom.RETRIEVAL_COUNT.labels(retriever_type=self._retriever_type).inc()
         prom.RETRIEVAL_DURATION.labels(retriever_type=self._retriever_type).observe(_ret_dur)
         prom.RETRIEVAL_DOCS.observe(len(sources))
+
+        # ── Rerank：精排 ──
+        if self._reranker and sources:
+            _rerank_start = time.perf_counter()
+            rerank_results = await self._reranker.rerank(
+                query, sources, top_k=self._rerank_top_k,
+            )
+            _rerank_dur = time.perf_counter() - _rerank_start
+            prom.RERANK_DURATION.labels(reranker_type=self._reranker_type).observe(_rerank_dur)
+            prom.RERANK_INPUT_DOCS.observe(len(sources))
+            prom.RERANK_OUTPUT_DOCS.observe(len(rerank_results))
+            sources = [
+                RetrievalResult(
+                    chunk_id=rr.chunk_id, content=rr.content,
+                    score=rr.score, source=rr.source, metadata=rr.metadata or {},
+                )
+                for rr in rerank_results
+            ]
+            logger.info("rag_rerank_done_stream", output_count=len(sources))
 
         # ── Self-RAG 第 2 层：相关性过滤 ──
         if self._enable_self_rag:

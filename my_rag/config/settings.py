@@ -77,6 +77,11 @@ class RetrievalSettings(BaseSettings):
     enable_cache: bool = True
     cache_similarity_threshold: float = 0.92
     cache_ttl_seconds: int = 3600
+    enable_rerank: bool = False
+    rerank_provider: str = "cross_encoder"
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_top_k: int = 5
+    rerank_score_threshold: float = 0.0
 
 
 class ChunkSettings(BaseSettings):

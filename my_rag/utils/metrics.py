@@ -106,6 +106,26 @@ VECTOR_STORE_SIZE = Gauge(
     "Total vectors in FAISS index",
 )
 
+# === Reranker Metrics ===
+RERANK_DURATION = Histogram(
+    "rag_rerank_duration_seconds",
+    "Reranker duration in seconds",
+    ["reranker_type"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+RERANK_INPUT_DOCS = Histogram(
+    "rag_rerank_input_documents",
+    "Number of documents sent to reranker",
+    buckets=(1, 3, 5, 10, 15, 20, 50),
+)
+
+RERANK_OUTPUT_DOCS = Histogram(
+    "rag_rerank_output_documents",
+    "Number of documents after reranking",
+    buckets=(1, 3, 5, 10, 15, 20),
+)
+
 # === Evaluation Metrics ===
 EVAL_SCORE = Gauge(
     "rag_evaluation_score",

@@ -15,6 +15,7 @@ from my_rag.core.rag_pipeline import RAGPipeline
 from my_rag.core.semantic_cache import SemanticCache
 from my_rag.domain.embedding.base import BaseEmbedding
 from my_rag.domain.llm.base import BaseLLM
+from my_rag.domain.reranker.base import BaseReranker
 from my_rag.domain.retrieval.base import BaseRetriever
 from my_rag.domain.retrieval.query_rewriter import QueryRewriter
 from my_rag.infrastructure.notification.base import BaseNotifier
@@ -26,6 +27,7 @@ _retriever: BaseRetriever | None = None
 _llm: BaseLLM | None = None
 _query_rewriter: QueryRewriter | None = None
 _semantic_cache: SemanticCache | None = None
+_reranker: BaseReranker | None = None
 _rag_pipeline: RAGPipeline | None = None
 _dingtalk_notifier: BaseNotifier | None = None
 
@@ -113,6 +115,22 @@ def get_semantic_cache() -> SemanticCache:
     return _semantic_cache
 
 
+def get_reranker() -> BaseReranker | None:
+    """获取 Reranker（未启用时返回 None）"""
+    global _reranker
+    if _reranker is None:
+        if not settings.retrieval.enable_rerank:
+            return None
+        from my_rag.domain.reranker.factory import RerankerFactory
+        _reranker = RerankerFactory.create(
+            provider=settings.retrieval.rerank_provider,
+            model=settings.retrieval.rerank_model,
+            score_threshold=settings.retrieval.rerank_score_threshold,
+            llm=get_llm() if settings.retrieval.rerank_provider == "llm" else None,
+        )
+    return _reranker
+
+
 def get_rag_pipeline() -> RAGPipeline:
     global _rag_pipeline
     if _rag_pipeline is None:
@@ -121,9 +139,11 @@ def get_rag_pipeline() -> RAGPipeline:
             llm=get_llm(),
             query_rewriter=get_query_rewriter(),
             semantic_cache=get_semantic_cache(),
+            reranker=get_reranker(),
             enable_hyde=settings.retrieval.enable_hyde,
             enable_multi_query=settings.retrieval.enable_multi_query,
             enable_cache=settings.retrieval.enable_cache,
+            rerank_top_k=settings.retrieval.rerank_top_k,
         )
     return _rag_pipeline
 

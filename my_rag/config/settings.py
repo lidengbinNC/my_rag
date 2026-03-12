@@ -105,6 +105,38 @@ class StorageSettings(BaseSettings):
     max_file_size: int = 50 * 1024 * 1024
 
 
+class VectorStoreSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="VECTOR_STORE_", extra="ignore",
+    )
+
+    # "faiss" 或 "milvus"
+    provider: str = "faiss"
+
+    # ── Milvus 连接 ──
+    milvus_host: str = "localhost"
+    milvus_port: int = 19530
+    milvus_user: str = ""
+    milvus_password: str = ""
+    milvus_db_name: str = "default"
+    # 企业版 / Zilliz Cloud 使用 URI + Token 方式
+    milvus_uri: str = ""
+    milvus_token: str = ""
+
+    # ── Collection 设计 ──
+    milvus_collection: str = "rag_chunks"
+    # IVF_FLAT / HNSW / IVF_SQ8（生产推荐 HNSW）
+    milvus_index_type: str = "HNSW"
+    # IP（内积，适合归一化向量） / L2
+    milvus_metric_type: str = "IP"
+    # HNSW 参数：M 越大召回越准但内存越多，efConstruction 越大建索引越慢但质量越好
+    milvus_hnsw_m: int = 16
+    milvus_hnsw_ef_construction: int = 256
+    # 搜索时 ef 越大召回越准但越慢（通常 ef >= top_k * 2）
+    milvus_hnsw_ef_search: int = 64
+
+
 class DingTalkSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE), env_file_encoding="utf-8",
@@ -131,6 +163,7 @@ class Settings(BaseSettings):
     retrieval: RetrievalSettings = RetrievalSettings()
     chunk: ChunkSettings = ChunkSettings()
     storage: StorageSettings = StorageSettings()
+    vector_store: VectorStoreSettings = VectorStoreSettings()
     dingtalk: DingTalkSettings = DingTalkSettings()
 
     @property

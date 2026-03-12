@@ -52,6 +52,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # 优雅关闭向量存储连接（Milvus 需要释放资源）
+    from my_rag.core.dependencies import shutdown_vector_store
+    await shutdown_vector_store()
+
     logger.info("myrag_shutdown")
 
 

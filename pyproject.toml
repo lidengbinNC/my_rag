@@ -34,6 +34,8 @@ dependencies = [
     "jieba>=0.42.0",
     # Phase 5: Observability
     "prometheus-client>=0.20.0",
+    # Vector Store: Milvus（可选，FAISS 模式下不需要安装）
+    "pymilvus>=2.4.0",
 ]
 
 [project.optional-dependencies]

@@ -313,8 +313,8 @@ class RAGPipeline:
 
         context = self._build_context_from_sources(build_sources)
         prompt = build_prompt(question=query, context=context, chat_history=chat_history)
-
         # ── Self-RAG 第 3 层：生成 + 支撑性检查（可重试） ──
+
         is_supported = None
         max_attempts = (1 + self._self_rag_max_retries) if self._enable_self_rag else 1
 

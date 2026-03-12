@@ -5,13 +5,15 @@
 - 模块级单例：利用 Python 模块的天然单例特性管理全局组件
 - 对比 Java 的 Spring IoC 容器：Python 更轻量，用工厂 + 全局变量即可
 - 延迟初始化（Lazy Init）：首次访问时才创建，避免启动时加载全部重量级模型
-- 组件依赖链：Embedding → VectorStore → DenseRetriever + SparseRetriever → HybridRetriever
-                                                                              ↓
-                                         LLM → QueryRewriter + SemanticCache → RAGPipeline
+- 组件依赖链：Embedding → VectorStore(FAISS/Milvus) → DenseRetriever + SparseRetriever → HybridRetriever
+                                                                                              ↓
+                                             LLM → QueryRewriter + SemanticCache → RAGPipeline
+- VectorStore 切换：通过 VECTOR_STORE_PROVIDER 环境变量，零代码改动切换 FAISS ↔ Milvus
 """
 
 from my_rag.config.settings import settings
 from my_rag.core.rag_pipeline import RAGPipeline
+from my_rag.utils.logger import get_logger
 from my_rag.core.semantic_cache import SemanticCache
 from my_rag.domain.embedding.base import BaseEmbedding
 from my_rag.domain.llm.base import BaseLLM
@@ -20,6 +22,8 @@ from my_rag.domain.retrieval.base import BaseRetriever
 from my_rag.domain.retrieval.query_rewriter import QueryRewriter
 from my_rag.infrastructure.notification.base import BaseNotifier
 from my_rag.infrastructure.vector_store.base import BaseVectorStore
+
+logger = get_logger(__name__)
 
 _embedding: BaseEmbedding | None = None
 _vector_store: BaseVectorStore | None = None
@@ -47,13 +51,46 @@ def get_embedding() -> BaseEmbedding:
 
 
 def get_vector_store() -> BaseVectorStore:
+    """
+    获取向量存储实例（支持 FAISS / Milvus 动态切换）
+
+    通过 VECTOR_STORE_PROVIDER 环境变量控制：
+      VECTOR_STORE_PROVIDER=faiss   → 本地 FAISS（开发/测试）
+      VECTOR_STORE_PROVIDER=milvus  → Milvus 服务（生产）
+    """
     global _vector_store
     if _vector_store is None:
-        from my_rag.infrastructure.vector_store.faiss_store import FAISSVectorStore
-        _vector_store = FAISSVectorStore(
-            dimension=get_embedding().dimension,
-            persist_dir=str(settings.data_dir / "faiss_index"),
-        )
+        from my_rag.infrastructure.vector_store.factory import VectorStoreFactory
+
+        provider = settings.vector_store.provider
+        vs_cfg = settings.vector_store
+
+        if provider == "milvus":
+            _vector_store = VectorStoreFactory.create(
+                provider="milvus",
+                dimension=get_embedding().dimension,
+                collection_name=vs_cfg.milvus_collection,
+                host=vs_cfg.milvus_host,
+                port=vs_cfg.milvus_port,
+                user=vs_cfg.milvus_user,
+                password=vs_cfg.milvus_password,
+                db_name=vs_cfg.milvus_db_name,
+                uri=vs_cfg.milvus_uri,
+                token=vs_cfg.milvus_token,
+                index_type=vs_cfg.milvus_index_type,
+                metric_type=vs_cfg.milvus_metric_type,
+                hnsw_m=vs_cfg.milvus_hnsw_m,
+                hnsw_ef_construction=vs_cfg.milvus_hnsw_ef_construction,
+                hnsw_ef_search=vs_cfg.milvus_hnsw_ef_search,
+            )
+        else:
+            _vector_store = VectorStoreFactory.create(
+                provider="faiss",
+                dimension=get_embedding().dimension,
+                persist_dir=str(settings.data_dir / "faiss_index"),
+            )
+
+        logger.info("vector_store_initialized", provider=provider)
     return _vector_store
 
 
@@ -146,6 +183,21 @@ def get_rag_pipeline() -> RAGPipeline:
             rerank_top_k=settings.retrieval.rerank_top_k,
         )
     return _rag_pipeline
+
+
+async def shutdown_vector_store() -> None:
+    """
+    优雅关闭向量存储连接（在 FastAPI lifespan 退出时调用）
+
+    对 FAISS：无需操作（内存数据已在写入时持久化）
+    对 Milvus：释放 Collection 内存占用，断开 gRPC 连接
+    """
+    global _vector_store
+    if _vector_store is not None and settings.vector_store.provider == "milvus":
+        from my_rag.infrastructure.vector_store.milvus_store import MilvusVectorStore
+        if isinstance(_vector_store, MilvusVectorStore):
+            await _vector_store.close()
+            logger.info("milvus_connection_closed")
 
 
 def get_dingtalk_notifier() -> BaseNotifier | None:

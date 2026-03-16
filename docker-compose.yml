@@ -1,15 +1,61 @@
 # 面试考点：Docker Compose 编排多服务 — 应用 + Milvus + Prometheus + Grafana 一键启动
 #
 # 启动方式：
-#   开发模式（FAISS，无 Milvus）：docker compose up myrag prometheus grafana
-#   生产模式（Milvus）：          docker compose --profile milvus up
+#   仅启动 Milvus 基础设施（本地开发推荐）：
+#     docker compose -f docker-compose.milvus.yml up -d
+#
+#   启动全部服务（含应用 + 监控，FAISS 模式）：
+#     docker compose up myrag prometheus grafana
+#
+#   启动全部服务（含应用 + Milvus + 监控）：
+#     docker compose --profile milvus up
 #
 # Milvus 架构说明（面试考点）：
 #   etcd：Milvus 的元数据存储（Collection schema、索引信息）
 #   minio：对象存储，存放向量索引文件和日志（WAL）
 #   milvus standalone：单机版，包含 proxy + queryNode + indexNode + dataNode
+#
+# BGE-M3 + Milvus 配置说明：
+#   EMBEDDING_MODEL=BAAI/bge-m3  → Dense 向量维度 1024
+#   VECTOR_STORE_PROVIDER=milvus → 使用 Milvus 存储
+#   VECTOR_STORE_MILVUS_HOST=localhost（本地）或 milvus（容器内互联）
 
 services:
+  # === MySQL 关系数据库（元数据存储）===
+  # 面试考点：
+  #   - utf8mb4 字符集支持完整 Unicode（含 emoji），是 MySQL 中文项目的标准选择
+  #   - innodb_buffer_pool_size 控制 InnoDB 缓冲池大小，建议为物理内存的 50%~70%
+  #   - 健康检查使用 mysqladmin ping，比 SELECT 1 更轻量
+  mysql:
+    image: mysql:8.0
+    container_name: myrag-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: myrag
+      MYSQL_USER: myrag
+      MYSQL_PASSWORD: myrag123
+      # 字符集配置：utf8mb4 + utf8mb4_unicode_ci 是 MySQL 8 的最佳实践
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 自定义配置文件（覆盖默认参数）
+      - ./deploy/mysql/my.cnf:/etc/mysql/conf.d/myrag.cnf:ro
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --innodb-buffer-pool-size=256M
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "myrag", "-pmyrag123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   # === 应用服务 ===
   myrag:
     build: .
@@ -20,6 +66,8 @@ services:
       - ./.env:/app/.env
     environment:
       - APP_DEBUG=false
+      # 容器内连接 MySQL 使用服务名 mysql，而非 localhost
+      - DATABASE_URL=mysql+aiomysql://myrag:myrag123@mysql:3306/myrag?charset=utf8mb4
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/v1/health')"]
@@ -27,6 +75,8 @@ services:
       timeout: 10s
       retries: 3
     depends_on:
+      mysql:
+        condition: service_healthy
       milvus:
         condition: service_healthy
         required: false  # FAISS 模式下不依赖 Milvus
@@ -128,6 +178,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  mysql_data:
   grafana_data:
   etcd_data:
   minio_data:

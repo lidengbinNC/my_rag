@@ -35,8 +35,15 @@ class DatabaseSettings(BaseSettings):
         env_prefix="DATABASE_", extra="ignore",
     )
 
-    url: str = "sqlite+aiosqlite:///./data/myrag.db"
+    # MySQL 异步连接串格式：mysql+aiomysql://user:password@host:3306/dbname?charset=utf8mb4
+    url: str = "mysql+aiomysql://myrag:myrag123@localhost:3306/myrag?charset=utf8mb4"
     echo: bool = False
+
+    # 连接池参数（面试考点：连接池调优）
+    pool_size: int = 10          # 常驻连接数，建议 = CPU 核心数 * 2
+    max_overflow: int = 20       # 超出 pool_size 后允许额外创建的连接数
+    pool_timeout: int = 30       # 等待连接超时秒数
+    pool_recycle: int = 3600     # 连接最大存活秒数（小于 MySQL wait_timeout=28800）
 
 
 class LLMSettings(BaseSettings):
@@ -60,8 +67,9 @@ class EmbeddingSettings(BaseSettings):
     )
 
     provider: str = "local"
-    model: str = "BAAI/bge-small-zh-v1.5"
-    dimension: int = 512
+    # BGE-M3：多功能多语言模型，Dense 维度 1024，支持 Dense + Sparse 混合检索
+    model: str = "BAAI/bge-m3"
+    dimension: int = 1024
 
 
 class RetrievalSettings(BaseSettings):

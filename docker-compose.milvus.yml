@@ -1,0 +1,108 @@
+# Milvus 基础设施独立编排文件
+#
+# 用途：仅启动 Milvus 所需的基础服务（etcd + MinIO + Milvus standalone）
+# 适合：本地开发时，应用在宿主机运行，只需要 Milvus 跑在 Docker 里
+#
+# 启动命令：
+#   docker compose -f docker-compose.milvus.yml up -d
+#
+# 停止命令：
+#   docker compose -f docker-compose.milvus.yml down
+#
+# 查看日志：
+#   docker compose -f docker-compose.milvus.yml logs -f milvus
+#
+# Milvus 架构说明（面试考点）：
+#   etcd        — 元数据存储（Collection schema、索引信息、节点注册）
+#   minio       — 对象存储（向量索引文件、WAL 日志、快照）
+#   milvus      — 单机版（standalone），内含 proxy + queryNode + indexNode + dataNode
+#
+# 连接信息：
+#   gRPC（SDK 连接）：localhost:19530
+#   HTTP（健康检查）：http://localhost:9091/healthz
+#   MinIO 控制台：  http://localhost:9001  (admin/minioadmin)
+
+services:
+
+  # ── etcd：Milvus 的元数据存储 ─────────────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: >
+      etcd
+      --advertise-client-urls=http://127.0.0.1:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # ── MinIO：对象存储，存放向量索引文件和 WAL ────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2023-03-13T19-46-17Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"   # MinIO Web Console（可视化管理）
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # ── Milvus Standalone ─────────────────────────────────────────────────────
+  # 面试考点：
+  #   standalone 模式将所有组件（proxy/queryNode/indexNode/dataNode）打包在一个进程
+  #   生产环境建议使用 distributed 模式，各组件独立扩缩容
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: milvus-standalone
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"   # gRPC（pymilvus SDK 连接端口）
+      - "9091:9091"     # HTTP（健康检查 / REST API）
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s   # Milvus 启动较慢，给足初始化时间
+    restart: unless-stopped
+
+volumes:
+  etcd_data:
+    driver: local
+  minio_data:
+    driver: local
+  milvus_data:
+    driver: local

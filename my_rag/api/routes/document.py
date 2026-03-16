@@ -212,4 +212,9 @@ async def delete_document(
         kb.updated_at = datetime.now()
 
     await db.delete(doc)
+
+    # 从 BM25 内存索引中移除该文档的所有 chunk（DB 级联删除由 ORM 处理）
+    from my_rag.core.dependencies import get_sparse_retriever
+    get_sparse_retriever().remove_by_document_id(doc_id)
+
     return APIResponse(message="文档已删除")

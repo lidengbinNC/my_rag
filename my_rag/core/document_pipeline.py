@@ -120,9 +120,6 @@ async def process_document(document_id: str) -> None:
             )
             VECTOR_STORE_SIZE.set(vector_store.count())
 
-            # 更新 BM25 索引（需要重建全量索引）
-            await _rebuild_bm25_index(session, sparse_retriever)
-
             for i, tc in enumerate(text_chunks):
                 chunk = Chunk(
                     id=chunk_ids[i],
@@ -145,6 +142,23 @@ async def process_document(document_id: str) -> None:
                 kb.updated_at = datetime.now()
 
             await session.commit()
+
+            # BM25 增量追加：commit 之后执行，无需查 DB，直接用本次已处理的 chunk
+            # 面试考点：增量追加 vs 全量重建
+            #   - 旧做法：每次 commit 前查全表 SELECT * FROM chunks，对所有 chunk 重新分词
+            #   - 新做法：只对本次新增的 chunk 分词并追加，O(新增) 而非 O(全量)
+            #   - 启动时仍用 _rebuild_bm25_index 从 DB 全量恢复（冷启动场景）
+            new_bm25_chunks = [
+                {
+                    "id": chunk_ids[i],
+                    "content": tc.content,
+                    "source": doc.filename,
+                    "document_id": doc.id,
+                    "knowledge_base_id": doc.knowledge_base_id,
+                }
+                for i, tc in enumerate(text_chunks)
+            ]
+            sparse_retriever.add_chunks(new_bm25_chunks)
 
             DOC_PROCESS_DURATION.observe(time.perf_counter() - _start)
             DOC_CHUNK_COUNT.observe(len(text_chunks))
@@ -169,35 +183,33 @@ async def process_document(document_id: str) -> None:
 
 
 async def _rebuild_bm25_index(session, sparse_retriever) -> None:
-    """从数据库加载全部 chunk 重建 BM25 索引。
-    
-    该函数用于在文档处理后更新全局 BM25 关键词检索索引，
-    确保新上传的文档可以被关键词搜索到。
-    
-    Args:
-        session: 异步数据库会话对象，用于查询 Chunk 数据
-        sparse_retriever: SparseRetriever 实例，用于构建BM25 索引
-    
-    Returns:
-        None
+    """
+    冷启动时从 DB 全量重建 BM25 索引。
+
+    调用时机：
+    - 应用启动（main.py lifespan）：进程重启后内存索引丢失，需从 DB 恢复
+    - 不在每次文档处理后调用（改为增量追加 sparse_retriever.add_chunks）
+
+    面试考点（正排索引 vs 倒排索引）：
+    - 正排索引：doc_id → [term1, term2, ...]，适合"给定文档，查它包含哪些词"
+    - 倒排索引：term → [doc_id1, doc_id2, ...]，适合"给定关键词，查哪些文档包含它"
+    - BM25 基于倒排索引，rank_bm25 在内存中维护词频矩阵，本质是稠密倒排索引
     """
     from sqlalchemy import select
-    # 查询数据库中所有 Chunk 记录
+
     result = await session.execute(select(Chunk))
     all_chunks = result.scalars().all()
-    
-    # 构建语料库，提取每个 chunk 的关键信息用于 BM25 索引
+
     corpus = [
         {
             "id": c.id,
             "content": c.content,
             "source": json.loads(c.metadata_json).get("source", "") if c.metadata_json else "",
+            "document_id": c.document_id,
             "knowledge_base_id": c.knowledge_base_id,
         }
         for c in all_chunks
     ]
-    
-    # 重建 BM25 倒排索引（全量替换）
-    # 这里简单了解下 正排索引和倒排索引的概念 区别就明白了
+
     sparse_retriever.build_index(corpus)
     logger.info("bm25_index_rebuilt", total_chunks=len(corpus))

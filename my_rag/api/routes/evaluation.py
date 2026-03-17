@@ -209,6 +209,121 @@ async def delete_dataset(dataset_name: str):
     return APIResponse(message=f"数据集 '{dataset_name}' 已删除")
 
 
+# ── HotpotQA 数据集导入 ───────────────────────────────────────────────
+
+
+class HotpotQAImportRequest(BaseModel):
+    num_samples: int = Field(default=20, ge=1, le=500, description="拉取样本数量")
+    split: str = Field(default="train", description="数据集分片：train / validation")
+    config_name: str = Field(default="distractor", description="数据集配置：distractor / fullwiki")
+    only_supporting: bool = Field(
+        default=False,
+        description="True：只保留支撑文章（更干净）；False：保留全部 10 篇含干扰项（更真实）",
+    )
+    export_docx: bool = Field(default=True, description="是否将 context 文章导出为 docx 文件")
+    merge_docx: bool = Field(
+        default=False,
+        description="True：所有文章合并为一个 docx；False：每篇文章单独一个 docx（推荐）",
+    )
+    dataset_name: str = Field(default="", description="数据集名称，留空则自动生成")
+    knowledge_base_id: str = Field(default="", description="关联的知识库 ID（可选，后续评估时使用）")
+
+
+class HotpotQAImportResponse(BaseModel):
+    dataset_name: str
+    total_samples: int
+    eval_json_path: str
+    docx_dir: str | None = None
+    docx_files: list[str] = []
+    total_articles: int = 0
+    samples: list[DatasetSampleResponse] = []
+
+
+@router.post("/import-hotpotqa", response_model=APIResponse[HotpotQAImportResponse])
+async def import_hotpotqa_dataset(body: HotpotQAImportRequest):
+    """
+    从 HuggingFace 拉取 HotpotQA 数据集并导入为评估数据集
+
+    流程：
+    1. 从 HuggingFace 拉取指定数量的 hotpot_qa 样本
+    2. 解析 context（10 篇文章）、question、answer
+    3. 将 context 文章导出为 docx 文件（方便上传到知识库 + 调试 chunk）
+    4. 生成标准 EvalDataset JSON（question + ground_truth）
+    5. 返回文件路径，供后续上传文档 + 批量评估使用
+
+    面试考点：
+    - 使用真实公开数据集避免 LLM 造数据的偏差
+    - HotpotQA 多跳推理特性：测试 RAG 跨文档检索能力
+    - docx 格式方便调试不同 chunk 策略对检索效果的影响
+    """
+    from pathlib import Path
+    from my_rag.evaluation.hotpotqa_loader import HotpotQALoader, HotpotQALoaderConfig
+
+    dataset_name = body.dataset_name or f"hotpotqa_{body.config_name}_{body.num_samples}"
+
+    docx_dir = None
+    if body.export_docx:
+        docx_dir = str(settings.data_dir / "hotpotqa_docs" / dataset_name)
+
+    cfg = HotpotQALoaderConfig(
+        split=body.split,
+        num_samples=body.num_samples,
+        config_name=body.config_name,
+        only_supporting=body.only_supporting,
+        output_dir=docx_dir,
+    )
+    loader = HotpotQALoader(cfg)
+
+    try:
+        samples, eval_dataset = loader.load()
+    except Exception as e:
+        logger.error("hotpotqa_load_failed", error=str(e))
+        return APIResponse(code=500, message=f"拉取 HotpotQA 数据集失败: {e}", data=None)
+
+    # 填充 knowledge_base_id（若已指定）
+    if body.knowledge_base_id:
+        for s in eval_dataset.samples:
+            if not s.knowledge_base_id:
+                s.knowledge_base_id = body.knowledge_base_id
+
+    eval_dataset.name = dataset_name
+
+    # 保存评估数据集 JSON
+    save_dir = settings.data_dir / "eval_datasets"
+    eval_json_path = str(save_dir / f"{dataset_name}.json")
+    eval_dataset.save(eval_json_path)
+
+    # 统计 docx 文件
+    docx_files: list[str] = []
+    total_articles = 0
+    if docx_dir:
+        docx_path = Path(docx_dir)
+        if docx_path.exists():
+            docx_files = [str(p) for p in sorted(docx_path.glob("*.docx"))]
+            total_articles = len(docx_files)
+
+    logger.info(
+        "hotpotqa_imported",
+        dataset_name=dataset_name,
+        total_samples=len(eval_dataset.samples),
+        total_articles=total_articles,
+        eval_json_path=eval_json_path,
+    )
+
+    return APIResponse(data=HotpotQAImportResponse(
+        dataset_name=dataset_name,
+        total_samples=len(eval_dataset.samples),
+        eval_json_path=eval_json_path,
+        docx_dir=docx_dir,
+        docx_files=docx_files,
+        total_articles=total_articles,
+        samples=[
+            DatasetSampleResponse(question=s.question, ground_truth=s.ground_truth)
+            for s in eval_dataset.samples[:10]  # 只返回前 10 条预览
+        ],
+    ))
+
+
 # ── 批量评估 ──────────────────────────────────────────────────────────
 
 

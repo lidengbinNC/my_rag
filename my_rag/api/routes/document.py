@@ -9,8 +9,10 @@
 
 import uuid
 from datetime import datetime
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +101,134 @@ async def upload_document(
     await db.refresh(doc)
 
     return APIResponse(data=_to_response(doc))
+
+
+class BatchUploadResultItem(BaseModel):
+    filename: str
+    status: str          # "success" | "failed" | "skipped"
+    doc_id: str = ""
+    error: str = ""
+
+
+class BatchUploadResponse(BaseModel):
+    total: int
+    success: int
+    failed: int
+    skipped: int
+    results: list[BatchUploadResultItem]
+
+
+@router.post(
+    "/knowledge-bases/{kb_id}/documents/batch",
+    response_model=APIResponse[BatchUploadResponse],
+)
+async def batch_upload_documents(
+    kb_id: str,
+    files: List[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    批量上传文档（支持同时上传多个文件）
+
+    面试考点：
+    - List[UploadFile] 接收多文件上传
+    - 逐文件处理，单个失败不影响其他文件
+    - 返回每个文件的处理结果，方便前端展示进度
+
+    典型用途：将 HotpotQA context 导出的多个 docx 文件一次性上传到知识库
+    """
+    kb = await db.get(KnowledgeBase, kb_id)
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    results: list[BatchUploadResultItem] = []
+    success_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for file in files:
+        filename = file.filename or "unknown"
+        suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+        if suffix not in ALLOWED_EXTENSIONS:
+            results.append(BatchUploadResultItem(
+                filename=filename,
+                status="skipped",
+                error=f"不支持的文件类型: {suffix}",
+            ))
+            skipped_count += 1
+            continue
+
+        try:
+            content = await file.read()
+            if len(content) > settings.storage.max_file_size:
+                results.append(BatchUploadResultItem(
+                    filename=filename,
+                    status="skipped",
+                    error="文件大小超过限制",
+                ))
+                skipped_count += 1
+                continue
+
+            upload_dir = settings.upload_path / kb_id
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+            doc_id = str(uuid.uuid4())
+            file_path = upload_dir / f"{doc_id}{suffix}"
+            file_path.write_bytes(content)
+
+            doc = Document(
+                id=doc_id,
+                filename=filename,
+                file_path=str(file_path),
+                file_size=len(content),
+                content_type=file.content_type,
+                status="pending",
+                knowledge_base_id=kb_id,
+                created_at=datetime.now(),
+            )
+            db.add(doc)
+            kb.document_count += 1
+            kb.updated_at = datetime.now()
+            await db.commit()
+
+            logger.info("batch_document_uploaded", doc_id=doc_id, filename=filename, size=len(content))
+
+            await process_document(doc_id)
+            await db.refresh(doc)
+
+            results.append(BatchUploadResultItem(
+                filename=filename,
+                status="success",
+                doc_id=doc_id,
+            ))
+            success_count += 1
+
+        except Exception as e:
+            logger.error("batch_upload_failed", filename=filename, error=str(e))
+            results.append(BatchUploadResultItem(
+                filename=filename,
+                status="failed",
+                error=str(e),
+            ))
+            failed_count += 1
+
+    logger.info(
+        "batch_upload_completed",
+        kb_id=kb_id,
+        total=len(files),
+        success=success_count,
+        failed=failed_count,
+        skipped=skipped_count,
+    )
+
+    return APIResponse(data=BatchUploadResponse(
+        total=len(files),
+        success=success_count,
+        failed=failed_count,
+        skipped=skipped_count,
+        results=results,
+    ))
 
 
 @router.get(
@@ -214,7 +344,10 @@ async def delete_document(
     await db.delete(doc)
 
     # 从 BM25 内存索引中移除该文档的所有 chunk（DB 级联删除由 ORM 处理）
-    from my_rag.core.dependencies import get_sparse_retriever
+    from my_rag.core.dependencies import get_sparse_retriever, get_vector_store
     get_sparse_retriever().remove_by_document_id(doc_id)
 
+    # 删除整个文档的所有 chunk（更常用）
+    milvus_store = get_vector_store()
+    await milvus_store.delete_by_metadata("document_id", doc_id)
     return APIResponse(message="文档已删除")

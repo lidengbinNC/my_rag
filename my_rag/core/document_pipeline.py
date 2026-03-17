@@ -191,7 +191,8 @@ async def _rebuild_bm25_index(session, sparse_retriever) -> None:
     - 不在每次文档处理后调用（改为增量追加 sparse_retriever.add_chunks）
 
     面试考点（正排索引 vs 倒排索引）：
-    - 正排索引：doc_id → [term1, term2, ...]，适合"给定文档，查它包含哪些词"
+    - 正排索引：doc_id → [term1, term2, ...]，适合
+    "给定文档，查它包含哪些词"
     - 倒排索引：term → [doc_id1, doc_id2, ...]，适合"给定关键词，查哪些文档包含它"
     - BM25 基于倒排索引，rank_bm25 在内存中维护词频矩阵，本质是稠密倒排索引
     """

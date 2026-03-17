@@ -85,7 +85,7 @@ class RAGPipeline:
         reranker: BaseReranker | None = None,
         enable_hyde: bool = False,
         enable_multi_query: bool = False,
-        enable_cache: bool = True,
+        enable_cache: bool = False,
         enable_self_rag: bool = False,
         self_rag_max_retries: int = 1,
         rerank_top_k: int = 5,

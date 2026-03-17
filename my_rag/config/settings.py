@@ -36,7 +36,7 @@ class DatabaseSettings(BaseSettings):
     )
 
     # MySQL 异步连接串格式：mysql+aiomysql://user:password@host:3306/dbname?charset=utf8mb4
-    url: str = "mysql+aiomysql://myrag:myrag123@localhost:3306/myrag?charset=utf8mb4"
+    url: str = "mysql+aiomysql://root:1234@localhost:3306/myrag?charset=utf8mb4"
     echo: bool = False
 
     # 连接池参数（面试考点：连接池调优）

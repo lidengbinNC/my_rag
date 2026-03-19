@@ -44,12 +44,29 @@
     <div id="doc-section" class="border-t border-gray-800 p-3 hidden">
         <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">文档</span>
-            <label class="text-xs text-brand-500 hover:text-brand-400 cursor-pointer transition">
-                + 上传
-                <input type="file" class="hidden" id="file-input" accept=".pdf,.docx,.doc,.md,.txt,.html" onchange="uploadDocument(this)">
-            </label>
+            <div class="flex items-center gap-2">
+                <label class="text-xs text-brand-500 hover:text-brand-400 cursor-pointer transition" title="批量上传多个文件">
+                    + 批量
+                    <input type="file" class="hidden" id="batch-file-input" accept=".pdf,.docx,.doc,.md,.txt,.html" multiple onchange="uploadBatchDocuments(this)">
+                </label>
+                <label class="text-xs text-brand-500 hover:text-brand-400 cursor-pointer transition">
+                    + 上传
+                    <input type="file" class="hidden" id="file-input" accept=".pdf,.docx,.doc,.md,.txt,.html" onchange="uploadDocument(this)">
+                </label>
+            </div>
         </div>
         <div id="doc-list" class="space-y-1 max-h-40 overflow-y-auto">
+        </div>
+        <!-- 批量上传进度 -->
+        <div id="batch-upload-progress" class="hidden mt-2 bg-gray-800/50 border border-gray-700 rounded-lg p-2.5">
+            <div class="flex items-center justify-between mb-1.5">
+                <span class="text-xs text-gray-400">批量上传进度</span>
+                <span id="batch-upload-count" class="text-xs text-gray-500"></span>
+            </div>
+            <div class="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                <div id="batch-upload-bar" class="h-full bg-brand-500 rounded-full transition-all duration-300" style="width:0%"></div>
+            </div>
+            <div id="batch-upload-status" class="mt-1.5 space-y-0.5 max-h-20 overflow-y-auto"></div>
         </div>
     </div>
 
@@ -132,6 +149,115 @@
     <!-- ========== 评估面板 ========== -->
     <div id="eval-panel" class="flex-1 overflow-y-auto p-5 hidden">
         <div class="max-w-5xl mx-auto space-y-6">
+
+            <!-- HotpotQA 数据集导入 -->
+            <div class="eval-card bg-gray-900 border border-gray-800 rounded-2xl p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-7 h-7 rounded-lg bg-violet-600/20 flex items-center justify-center">
+                            <svg class="w-4 h-4 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-semibold text-white">从 HotpotQA 导入测试数据</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">从 HuggingFace 拉取真实多跳推理数据集，自动生成评估样本 + docx 文档</p>
+                        </div>
+                    </div>
+                    <button id="import-hotpotqa-btn" onclick="importHotpotQA()"
+                        class="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-lg text-xs font-medium transition flex items-center gap-2">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                        拉取并导入
+                    </button>
+                </div>
+
+                <!-- 参数配置 -->
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">样本数量</label>
+                        <input id="hq-num-samples" type="number" value="20" min="1" max="500"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-violet-600">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">数据分片</label>
+                        <select id="hq-split"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-violet-600">
+                            <option value="train">train（训练集）</option>
+                            <option value="validation">validation（验证集）</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">Context 模式</label>
+                        <select id="hq-only-supporting"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-violet-600">
+                            <option value="false">全部 10 篇（含干扰）</option>
+                            <option value="true">仅支撑文章（更干净）</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">数据集名称</label>
+                        <input id="hq-dataset-name" type="text" placeholder="留空自动生成"
+                            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-violet-600">
+                    </div>
+                </div>
+                <div class="flex items-center gap-4 mb-3 flex-wrap">
+                    <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-gray-400">
+                        <input type="checkbox" id="hq-export-docx" checked
+                            class="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-violet-600 focus:ring-violet-600/50 focus:ring-offset-0 cursor-pointer">
+                        导出 docx 文档（方便调试 chunk）
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-gray-400">
+                        <input type="checkbox" id="hq-merge-docx"
+                            class="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-violet-600 focus:ring-violet-600/50 focus:ring-offset-0 cursor-pointer">
+                        合并为单个 docx
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-emerald-400" title="自动将 context 文章写入当前知识库（MySQL + Milvus + BM25），需先选择知识库">
+                        <input type="checkbox" id="hq-auto-ingest" checked
+                            class="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-emerald-600 focus:ring-emerald-600/50 focus:ring-offset-0 cursor-pointer">
+                        自动写入知识库（chunk + 向量化）
+                    </label>
+                </div>
+
+                <!-- 导入结果 -->
+                <div id="hotpotqa-result" class="hidden bg-gray-800/50 border border-gray-700 rounded-xl p-4">
+                    <div class="flex items-start justify-between mb-3">
+                        <div>
+                            <div class="text-xs font-semibold text-white mb-1" id="hq-result-title">导入完成</div>
+                            <div class="text-xs text-gray-400" id="hq-result-stats"></div>
+                            <div class="text-xs mt-1 hidden" id="hq-ingest-stats"></div>
+                            <div class="text-xs text-gray-600 mt-0.5" id="hq-raw-json-path"></div>
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0">
+                            <button id="hq-load-dataset-btn" onclick="loadHotpotQADataset()"
+                                class="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 rounded-lg text-xs font-medium transition">
+                                加载到评估面板
+                            </button>
+                            <button id="hq-batch-upload-btn" onclick="uploadHotpotQADocs()"
+                                class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-xs font-medium transition flex items-center gap-1.5">
+                                <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+                                批量上传 docx 到知识库
+                            </button>
+                        </div>
+                    </div>
+                    <!-- docx 文件列表 -->
+                    <div id="hq-docx-list" class="hidden">
+                        <div class="text-xs text-gray-500 mb-2">生成的 docx 文件（每篇文章一个，可直接上传到知识库）：</div>
+                        <div id="hq-docx-files" class="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto"></div>
+                    </div>
+                    <!-- 样本预览（含完整 HotpotQA 元信息） -->
+                    <div id="hq-samples-preview" class="hidden mt-3">
+                        <div class="text-xs text-gray-500 mb-2">样本预览（前 10 条，含 HotpotQA 完整元信息）：</div>
+                        <div id="hq-samples-list" class="space-y-2 max-h-64 overflow-y-auto"></div>
+                    </div>
+                </div>
+
+                <!-- 导入进度 -->
+                <div id="hotpotqa-loading" class="hidden flex items-center gap-3 py-3">
+                    <div class="eval-spinner"></div>
+                    <div>
+                        <div class="text-xs text-gray-300">正在从 HuggingFace 拉取数据集...</div>
+                        <div class="text-xs text-gray-600 mt-0.5">使用 hf-mirror.com 镜像加速，请耐心等待</div>
+                    </div>
+                </div>
+            </div>
 
             <!-- 已有数据集 -->
             <div class="eval-card bg-gray-900 border border-gray-800 rounded-2xl p-5">
@@ -273,6 +399,92 @@
                 </div>
             </div>
 
+            <!-- 评估历史记录 -->
+            <div class="eval-card bg-gray-900 border border-gray-800 rounded-2xl p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-7 h-7 rounded-lg bg-emerald-600/20 flex items-center justify-center">
+                            <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-semibold text-white">评估历史</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">每次评估自动持久化，可对比不同配置的效果</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <!-- 对比按钮（选中 2 条后激活） -->
+                        <button id="compare-btn" onclick="compareSelectedRuns()"
+                            class="px-3 py-1.5 bg-gray-700 hover:bg-emerald-700 disabled:bg-gray-800 disabled:text-gray-600 rounded-lg text-xs font-medium transition hidden"
+                            disabled>
+                            对比选中
+                        </button>
+                        <button onclick="loadEvalHistory()"
+                            class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-xs font-medium transition flex items-center gap-1.5">
+                            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                            刷新
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 历史列表表格 -->
+                <div class="overflow-x-auto rounded-lg border border-gray-800">
+                    <table class="w-full text-xs">
+                        <thead class="bg-gray-800/80 sticky top-0">
+                            <tr>
+                                <th class="px-3 py-2 w-6"></th>
+                                <th class="text-left px-3 py-2 text-gray-400 font-medium">名称</th>
+                                <th class="text-left px-3 py-2 text-gray-400 font-medium w-16">类型</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-14">样本数</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-16">忠实度</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-16">相关性</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-16">召回率</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-16">正确性</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-14">EM</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-14">F1</th>
+                                <th class="text-left px-3 py-2 text-gray-400 font-medium w-32">时间</th>
+                                <th class="text-center px-3 py-2 text-gray-400 font-medium w-16">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="eval-history-tbody">
+                            <tr><td colspan="12" class="text-center py-8 text-gray-600 text-xs">点击"刷新"加载历史记录</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- 评估历史详情 Modal -->
+    <div id="eval-history-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
+        <div class="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-4xl mx-4 max-h-[90vh] flex flex-col">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-800">
+                <div>
+                    <h3 class="text-sm font-semibold text-white" id="history-modal-title">评估详情</h3>
+                    <p class="text-xs text-gray-500 mt-0.5" id="history-modal-subtitle"></p>
+                </div>
+                <button onclick="closeHistoryModal()" class="text-gray-500 hover:text-white transition">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="overflow-y-auto flex-1 p-5">
+                <div id="history-modal-body"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 评估对比 Modal -->
+    <div id="eval-compare-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
+        <div class="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-3xl mx-4 max-h-[90vh] flex flex-col">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-800">
+                <h3 class="text-sm font-semibold text-white">评估对比</h3>
+                <button onclick="closeCompareModal()" class="text-gray-500 hover:text-white transition">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="overflow-y-auto flex-1 p-5">
+                <div id="compare-modal-body"></div>
+            </div>
         </div>
     </div>
 
@@ -420,7 +632,7 @@
 
 <!-- ========== 单条评估详情 Modal ========== -->
 <div id="eval-detail-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden">
-    <div class="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6 shadow-2xl">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6 shadow-2xl">
         <div class="flex items-center justify-between mb-5">
             <h3 class="text-lg font-semibold text-white">单条评估详情</h3>
             <button onclick="hideEvalDetailModal()" class="text-gray-500 hover:text-white transition">
@@ -428,8 +640,41 @@
             </button>
         </div>
 
-        <!-- 指标卡片 -->
-        <div id="detail-scores" class="grid grid-cols-5 gap-2 mb-5"></div>
+        <!-- RAGAS 指标卡片（5 列） -->
+        <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">RAGAS 指标</div>
+        <div id="detail-scores" class="grid grid-cols-5 gap-2 mb-4"></div>
+
+        <!-- HotpotQA 官方指标（EM + F1），有数据时才显示 -->
+        <div id="detail-hotpot-metrics" class="hidden mb-5">
+            <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">HotpotQA 官方指标（客观）</div>
+            <div class="grid grid-cols-2 gap-3">
+                <div id="detail-em-card" class="metric-card" style="padding: 10px 8px;">
+                    <div class="metric-label" style="font-size: 0.625rem;">Exact Match</div>
+                    <div id="detail-em-value" class="metric-value" style="font-size: 1.125rem;">—</div>
+                    <div class="metric-bar"><div id="detail-em-bar" class="metric-bar-fill" style="width: 0%"></div></div>
+                </div>
+                <div id="detail-f1-card" class="metric-card" style="padding: 10px 8px;">
+                    <div class="metric-label" style="font-size: 0.625rem;">Token F1</div>
+                    <div id="detail-f1-value" class="metric-value" style="font-size: 1.125rem;">—</div>
+                    <div class="metric-bar"><div id="detail-f1-bar" class="metric-bar-fill" style="width: 0%"></div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- HotpotQA 样本元信息（type/level/supporting_titles），有数据时才显示 -->
+        <div id="detail-hotpot-meta" class="hidden mb-4">
+            <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">HotpotQA 样本信息</div>
+            <div class="bg-gray-800/60 border border-gray-700/50 rounded-lg px-4 py-3 space-y-2">
+                <div class="flex flex-wrap gap-4 text-xs">
+                    <span class="text-gray-500">推理类型：<span id="detail-hq-type" class="text-amber-400 font-medium"></span></span>
+                    <span class="text-gray-500">难度：<span id="detail-hq-level" class="text-cyan-400 font-medium"></span></span>
+                </div>
+                <div id="detail-hq-supporting" class="hidden">
+                    <div class="text-xs text-gray-500 mb-1">支撑文章（需要这些文章才能回答）：</div>
+                    <div id="detail-hq-supporting-list" class="flex flex-wrap gap-1.5"></div>
+                </div>
+            </div>
+        </div>
 
         <!-- 问题 -->
         <div class="mb-4">
@@ -446,7 +691,7 @@
         <!-- 标准答案 -->
         <div id="detail-gt-section" class="mb-4">
             <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">标准答案 (Ground Truth)</div>
-            <div id="detail-ground-truth" class="bg-gray-800 rounded-lg px-4 py-3 text-sm text-gray-300"></div>
+            <div id="detail-ground-truth" class="bg-gray-800 rounded-lg px-4 py-3 text-sm text-gray-300 font-medium"></div>
         </div>
 
         <!-- 检索上下文 -->

@@ -42,6 +42,24 @@ class HotpotQASample:
     context_titles: list[str] = field(default_factory=list)
     context_texts: list[str] = field(default_factory=list)   # 每篇文章的完整文本
     supporting_titles: list[str] = field(default_factory=list)  # 支撑文章标题
+    # 原始 supporting_facts：[{title, sent_id}]，用于精确定位支撑句子
+    supporting_facts: list[dict] = field(default_factory=list)
+
+    def to_raw_dict(self) -> dict:
+        """序列化为完整原始格式，便于保存和前端展示"""
+        return {
+            "id": self.id,
+            "question": self.question,
+            "answer": self.answer,
+            "type": self.type,
+            "level": self.level,
+            "context": [
+                {"title": t, "text": txt}
+                for t, txt in zip(self.context_titles, self.context_texts)
+            ],
+            "supporting_facts": self.supporting_facts,
+            "supporting_titles": self.supporting_titles,
+        }
 
 
 @dataclass
@@ -53,6 +71,7 @@ class HotpotQALoaderConfig:
     only_supporting: bool = False      # True：只保留支撑文章；False：保留全部 10 篇（含干扰）
     output_dir: Optional[str] = None  # docx 输出目录，None 则不生成
     save_eval_json: bool = True        # 是否保存评估数据集 JSON
+    raw_json_dir: Optional[str] = None  # 完整原始 JSON 保存目录（None 则不保存）
 
 
 class HotpotQALoader:
@@ -107,6 +126,9 @@ class HotpotQALoader:
         if self._config.output_dir:
             self._export_docx(samples, Path(self._config.output_dir))
 
+        if self._config.raw_json_dir:
+            self._save_raw_json(samples, Path(self._config.raw_json_dir))
+
         return samples, eval_dataset
 
     # ── 内部方法 ──────────────────────────────────────────────────────
@@ -124,9 +146,15 @@ class HotpotQALoader:
             for sents in sentences_list
         ]
 
-        # 支撑文章标题（去重）
+        # 支撑事实：保留完整 {title, sent_id} 结构
         sf = row.get("supporting_facts", {})
-        supporting_titles = list(dict.fromkeys(sf.get("title", [])))
+        sf_titles = sf.get("title", [])
+        sf_sent_ids = sf.get("sent_id", [])
+        supporting_facts = [
+            {"title": t, "sent_id": sid}
+            for t, sid in zip(sf_titles, sf_sent_ids)
+        ]
+        supporting_titles = list(dict.fromkeys(sf_titles))
 
         if self._config.only_supporting:
             # 只保留支撑文章
@@ -146,7 +174,32 @@ class HotpotQALoader:
             context_titles=titles,
             context_texts=context_texts,
             supporting_titles=supporting_titles,
+            supporting_facts=supporting_facts,
         )
+
+    def _save_raw_json(self, samples: list[HotpotQASample], output_dir: Path) -> Path:
+        """将完整原始样本数据保存为 JSON 文件到 evaluation 目录
+
+        保存内容包括：question/answer/type/level/context（含所有文章）/supporting_facts
+        前端可直接读取展示，也可用于离线分析。
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        dataset_name = f"hotpotqa_{self._config.config_name}_{self._config.num_samples}"
+        out_path = output_dir / f"{dataset_name}_raw.json"
+
+        payload = {
+            "dataset_name": dataset_name,
+            "config_name": self._config.config_name,
+            "split": self._config.split,
+            "num_samples": len(samples),
+            "only_supporting": self._config.only_supporting,
+            "samples": [s.to_raw_dict() for s in samples],
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        logger.info("hotpotqa_raw_json_saved", path=str(out_path), total=len(samples))
+        return out_path
 
     def _build_eval_dataset(self, samples: list[HotpotQASample]) -> EvalDataset:
         """构建 EvalDataset（question + ground_truth，knowledge_base_id 留空待填充）"""

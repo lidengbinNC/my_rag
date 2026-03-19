@@ -84,7 +84,7 @@ class RAGPipeline:
         semantic_cache: SemanticCache | None = None,
         reranker: BaseReranker | None = None,
         enable_hyde: bool = False,
-        enable_multi_query: bool = False,
+        enable_multi_query: bool = True,
         enable_cache: bool = False,
         enable_self_rag: bool = False,
         self_rag_max_retries: int = 1,
@@ -108,7 +108,7 @@ class RAGPipeline:
         self,
         query: str,
         knowledge_base_id: str,
-        top_k: int = 5,
+        top_k: int = 10,
         chat_history: str = "",
     ) -> RAGResponse:
         """同步执行完整 RAG 流程（带链路追踪 + Prometheus 指标 + 可选 Self-RAG）"""
@@ -199,6 +199,7 @@ class RAGPipeline:
                 with trace.span("llm_generate", attempt=attempt):
                     _llm_start = time.perf_counter()
                     answer = await self._llm.generate(prompt)
+                    logger.info("llm_generate cost %s", time.perf_counter() - _llm_start)
                     prom.LLM_DURATION.observe(time.perf_counter() - _llm_start)
 
                 if self._enable_self_rag:

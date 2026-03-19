@@ -18,8 +18,9 @@ MySQL 适配要点：
 
 import uuid
 from datetime import datetime
+from typing import Optional
 
-from sqlalchemy import ForeignKey, Index, String, Text, func
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -164,3 +165,94 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+
+class EvalRun(Base):
+    """
+    评估运行记录（一次批量评估 = 一条 EvalRun）
+
+    设计要点：
+    - 每次调用 /batch 或 /evaluations 都生成一条 EvalRun
+    - 汇总指标冗余存储（avg_*），方便直接 SELECT 对比，无需 JOIN 聚合
+    - config_snapshot 存储评估时的配置快照（chunk 策略、检索参数等），
+      方便事后分析"为什么这次分数高/低"
+    - dataset_name 关联到 eval_datasets JSON 文件，可追溯原始数据集
+    """
+    __tablename__ = "eval_runs"
+    __table_args__ = (
+        Index("idx_eval_run_kb_id", "knowledge_base_id"),
+        Index("idx_eval_run_created_at", "created_at"),
+        _MYSQL_TABLE_KWARGS,
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(_UUID_LEN), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    # 评估名称，便于人工识别（如 "hotpotqa_20条_bge-m3_chunk512"）
+    name: Mapped[str] = mapped_column(String(255), default="")
+    # 关联知识库
+    knowledge_base_id: Mapped[str] = mapped_column(String(_UUID_LEN), default="")
+    # 关联数据集名称（对应 eval_datasets/*.json 文件名）
+    dataset_name: Mapped[str] = mapped_column(String(255), default="")
+    # 评估类型：single | batch
+    run_type: Mapped[str] = mapped_column(String(32), default="batch")
+
+    # 汇总指标（冗余存储，-1 表示未计算）
+    total_samples: Mapped[int] = mapped_column(Integer, default=0)
+    avg_faithfulness: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    avg_answer_relevancy: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    avg_context_recall: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    avg_answer_correctness: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    avg_exact_match: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    avg_token_f1: Mapped[Optional[float]] = mapped_column(Float, default=None)
+
+    # 配置快照：JSON 字符串，记录评估时的 RAG 配置（chunk_size、retriever 类型等）
+    config_snapshot: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    items: Mapped[list["EvalResultItem"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="EvalResultItem.created_at"
+    )
+
+
+class EvalResultItem(Base):
+    """
+    单条评估结果（EvalRun 的明细行）
+
+    设计要点：
+    - 与 EvalRun 一对多关系
+    - 所有指标可为 NULL（Optional[float]），区分"未计算"和"真实零分"
+    - answer/contexts_json 存储 RAG 实际输出，方便事后人工复核
+    - exact_match/token_f1 是 HotpotQA 官方指标，不依赖 LLM，客观可靠
+    """
+    __tablename__ = "eval_result_items"
+    __table_args__ = (
+        Index("idx_eval_item_run_id", "run_id"),
+        _MYSQL_TABLE_KWARGS,
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(_UUID_LEN), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    run_id: Mapped[str] = mapped_column(String(_UUID_LEN), ForeignKey("eval_runs.id"))
+
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, default="")
+    ground_truth: Mapped[str] = mapped_column(Text, default="")
+    # 检索到的 context 列表，JSON 序列化存储
+    contexts_json: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+    # RAGAS 指标（NULL = 未计算）
+    faithfulness: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    answer_relevancy: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    context_recall: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    answer_correctness: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    overall_score: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    # HotpotQA 官方指标
+    exact_match: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    token_f1: Mapped[Optional[float]] = mapped_column(Float, default=None)
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    run: Mapped["EvalRun"] = relationship(back_populates="items")

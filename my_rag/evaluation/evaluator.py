@@ -6,6 +6,7 @@
 - 自动化评估的价值：调参后能快速定量对比效果
 - A/B 测试场景：切换分块策略/检索参数后，对比评估分数
 """
+import time
 
 from my_rag.core.rag_pipeline import RAGPipeline
 from my_rag.evaluation.dataset import EvalDataset
@@ -71,12 +72,20 @@ class PipelineEvaluator:
         question: str,
         knowledge_base_id: str,
         ground_truth: str = "",
+        supporting_titles: list[str] = None
     ) -> EvaluationResult:
         """评估单条问题"""
+
+        start = time.perf_counter()
+
         rag_result = await self._pipeline.run(
             query=question,
             knowledge_base_id=knowledge_base_id,
         )
+
+        end = time.perf_counter()
+
+        logger.info("evaluate_single _pipeline time cost %s", end-start )
 
         contexts = [s.content for s in rag_result.sources]
 
@@ -85,4 +94,5 @@ class PipelineEvaluator:
             answer=rag_result.answer,
             contexts=contexts,
             ground_truth=ground_truth,
+            supporting_titles = supporting_titles
         )

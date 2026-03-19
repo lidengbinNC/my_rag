@@ -19,6 +19,8 @@ const state = {
     evalResults: null,
     isEvaluating: false,
     savedDatasets: [],
+    // HotpotQA 导入结果
+    hotpotqaResult: null,
 };
 
 // ==================== 初始化 ====================
@@ -241,6 +243,61 @@ async function deleteDoc(docId) {
     } catch (e) {
         showToast("删除失败", "error");
     }
+}
+
+async function uploadBatchDocuments(input) {
+    if (!state.currentKB || !input.files.length) return;
+    const files = Array.from(input.files);
+
+    const progressEl = document.getElementById("batch-upload-progress");
+    const barEl = document.getElementById("batch-upload-bar");
+    const countEl = document.getElementById("batch-upload-count");
+    const statusEl = document.getElementById("batch-upload-status");
+
+    progressEl.classList.remove("hidden");
+    barEl.style.width = "0%";
+    statusEl.innerHTML = "";
+    countEl.textContent = `0 / ${files.length}`;
+
+    showToast(`开始批量上传 ${files.length} 个文件...`, "info");
+
+    let done = 0;
+    for (const file of files) {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const itemEl = document.createElement("div");
+        itemEl.className = "flex items-center gap-1.5 text-xs";
+        itemEl.innerHTML = `<span class="eval-spinner-sm"></span><span class="text-gray-400 truncate">${escapeHtml(file.name)}</span>`;
+        statusEl.appendChild(itemEl);
+        statusEl.scrollTop = statusEl.scrollHeight;
+
+        try {
+            const res = await fetch(`${API}/knowledge-bases/${state.currentKB.id}/documents`, {
+                method: "POST",
+                body: formData,
+            });
+            const json = await res.json();
+            if (json.code === 200) {
+                itemEl.innerHTML = `<span class="text-emerald-400">✓</span><span class="text-gray-400 truncate">${escapeHtml(file.name)}</span>`;
+            } else {
+                itemEl.innerHTML = `<span class="text-red-400">✗</span><span class="text-gray-500 truncate">${escapeHtml(file.name)}: ${escapeHtml(json.message || "失败")}</span>`;
+            }
+        } catch (e) {
+            itemEl.innerHTML = `<span class="text-red-400">✗</span><span class="text-gray-500 truncate">${escapeHtml(file.name)}: ${escapeHtml(e.message)}</span>`;
+        }
+
+        done++;
+        barEl.style.width = `${Math.round(done / files.length * 100)}%`;
+        countEl.textContent = `${done} / ${files.length}`;
+    }
+
+    showToast(`批量上传完成：${files.length} 个文件`, "success");
+    await loadDocuments();
+    await loadKnowledgeBases();
+    input.value = "";
+
+    setTimeout(() => progressEl.classList.add("hidden"), 5000);
 }
 
 // ==================== 对话历史 ====================
@@ -771,6 +828,7 @@ async function selectSavedDataset(name) {
             state.evalDataset = json.data.samples.map(s => ({
                 question: s.question,
                 ground_truth: s.ground_truth,
+                metadata: s.metadata || {},
             }));
             renderDatasetTable();
             updateEvalButtons();
@@ -799,6 +857,259 @@ async function deleteSavedDataset(name) {
     } catch (e) {
         showToast("删除失败: " + e.message, "error");
     }
+}
+
+// ==================== HotpotQA 数据集导入 ====================
+
+async function importHotpotQA() {
+    const btn = document.getElementById("import-hotpotqa-btn");
+    const loadingEl = document.getElementById("hotpotqa-loading");
+    const resultEl = document.getElementById("hotpotqa-result");
+
+    const numSamples = parseInt(document.getElementById("hq-num-samples").value) || 20;
+    const split = document.getElementById("hq-split").value;
+    const onlySupporting = document.getElementById("hq-only-supporting").value === "true";
+    const exportDocx = document.getElementById("hq-export-docx").checked;
+    const mergeDocx = document.getElementById("hq-merge-docx").checked;
+    const autoIngest = document.getElementById("hq-auto-ingest").checked;
+    const datasetName = document.getElementById("hq-dataset-name").value.trim();
+    const kbId = state.currentKB?.id || "";
+
+    if (autoIngest && !kbId) {
+        showToast("已勾选「自动写入知识库」，请先在左侧选择一个知识库", "error");
+        return;
+    }
+
+    btn.disabled = true;
+    const loadingTextEl = loadingEl.querySelector(".text-xs.text-gray-300");
+    if (loadingTextEl) loadingTextEl.textContent = "正在从 HuggingFace 拉取数据集...";
+    loadingEl.classList.remove("hidden");
+    resultEl.classList.add("hidden");
+
+    try {
+        const res = await fetch(`${API}/evaluations/import-hotpotqa`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                num_samples: numSamples,
+                split,
+                config_name: "distractor",
+                only_supporting: onlySupporting,
+                export_docx: exportDocx,
+                merge_docx: mergeDocx,
+                auto_ingest: autoIngest,
+                dataset_name: datasetName,
+                knowledge_base_id: kbId,
+            }),
+        });
+        const json = await res.json();
+
+        if (json.code === 200 && json.data) {
+            state.hotpotqaResult = json.data;
+            // 先渲染基础结果（ingest 还在后台跑）
+            renderHotpotQAResult(json.data);
+            showToast(`HotpotQA 导入成功：${json.data.total_samples} 条样本，${json.data.total_articles} 篇文章`, "success");
+            await loadSavedDatasets();
+
+            // 如果有后台 ingest 任务，启动轮询
+            if (json.data.ingest_task_id) {
+                pollIngestProgress(json.data.ingest_task_id, json.data.ingest_total);
+            }
+        } else {
+            showToast(json.message || "导入失败", "error");
+        }
+    } catch (e) {
+        showToast("导入失败: " + e.message, "error");
+    }
+
+    btn.disabled = false;
+    loadingEl.classList.add("hidden");
+}
+
+async function pollIngestProgress(taskId, total) {
+    const ingestStatsEl = document.getElementById("hq-ingest-stats");
+    ingestStatsEl.classList.remove("hidden");
+
+    let interval = 2000;  // 初始 2 秒轮询一次
+    let attempts = 0;
+    const maxAttempts = 120;  // 最多轮询 120 次（约 4 分钟）
+
+    while (attempts < maxAttempts) {
+        await new Promise(r => setTimeout(r, interval));
+        attempts++;
+
+        try {
+            const res = await fetch(`${API}/evaluations/ingest-status/${encodeURIComponent(taskId)}`);
+            const json = await res.json();
+            if (json.code !== 200 || !json.data) break;
+
+            const p = json.data;
+            const pct = total > 0 ? Math.round((p.done / total) * 100) : 0;
+
+            if (p.status === "running") {
+                ingestStatsEl.innerHTML =
+                    `<span class="text-blue-400">⏳ 正在写入知识库：${p.done}/${p.total} 篇完成（${pct}%）· 已耗时 ${p.elapsed_s}s</span>`;
+                // 随着进度推进，轮询间隔逐渐拉长（避免频繁请求）
+                interval = Math.min(interval + 1000, 5000);
+            } else if (p.status === "completed") {
+                const failPart = p.failed > 0
+                    ? `<span class="text-red-400 ml-2">· ${p.failed} 篇失败</span>`
+                    : "";
+                ingestStatsEl.innerHTML =
+                    `<span class="text-emerald-400">✓ 已写入知识库：${p.done} 篇文章（chunk + 向量化完成，耗时 ${p.elapsed_s}s）</span>${failPart}`;
+                showToast(`知识库写入完成：${p.done} 篇文章`, "success");
+                break;
+            } else if (p.status === "failed") {
+                ingestStatsEl.innerHTML =
+                    `<span class="text-red-400">✗ 写入失败：${p.error || "未知错误"}</span>`;
+                showToast("知识库写入失败", "error");
+                break;
+            }
+        } catch (e) {
+            // 网络异常，继续重试
+        }
+    }
+}
+
+function renderHotpotQAResult(data) {
+    const resultEl = document.getElementById("hotpotqa-result");
+    resultEl.classList.remove("hidden");
+
+    document.getElementById("hq-result-title").textContent = `已导入：${data.dataset_name}`;
+    document.getElementById("hq-result-stats").textContent =
+        `${data.total_samples} 条评估样本 · ${data.total_articles} 篇 context 文章` +
+        (data.docx_dir ? ` · docx 目录: ${data.docx_dir}` : "");
+
+    // ingest 进度由 pollIngestProgress 动态更新，这里只做初始化
+    const ingestStatsEl = document.getElementById("hq-ingest-stats");
+    if (data.ingest_task_id && data.ingest_total > 0) {
+        ingestStatsEl.classList.remove("hidden");
+        ingestStatsEl.innerHTML =
+            `<span class="text-blue-400">⏳ 正在后台写入知识库（${data.ingest_total} 篇文章），chunk + 向量化中...</span>`;
+    } else {
+        ingestStatsEl.classList.add("hidden");
+    }
+
+    // 显示原始 JSON 路径
+    const rawPathEl = document.getElementById("hq-raw-json-path");
+    if (data.raw_json_path) {
+        rawPathEl.textContent = `完整原始 JSON：${data.raw_json_path}`;
+        rawPathEl.classList.remove("hidden");
+    } else {
+        rawPathEl.classList.add("hidden");
+    }
+
+    // 显示 docx 文件列表
+    const docxListEl = document.getElementById("hq-docx-list");
+    const docxFilesEl = document.getElementById("hq-docx-files");
+    if (data.docx_files && data.docx_files.length > 0) {
+        docxListEl.classList.remove("hidden");
+        docxFilesEl.innerHTML = data.docx_files.map(fp => {
+            const name = fp.split(/[\\/]/).pop();
+            return `<span class="inline-flex items-center gap-1 bg-gray-700/50 border border-gray-600/50 rounded-md px-2 py-0.5 text-xs text-gray-300" title="${escapeHtml(fp)}">
+                <span>📘</span><span class="truncate max-w-[120px]">${escapeHtml(name)}</span>
+            </span>`;
+        }).join("");
+    } else {
+        docxListEl.classList.add("hidden");
+    }
+
+    // 显示样本预览（含完整 HotpotQA 元信息）
+    const samplesPreviewEl = document.getElementById("hq-samples-preview");
+    const samplesListEl = document.getElementById("hq-samples-list");
+    if (data.samples && data.samples.length > 0) {
+        samplesPreviewEl.classList.remove("hidden");
+        samplesListEl.innerHTML = data.samples.map((s, i) => {
+            const meta = s.metadata || {};
+            const typeBadge = meta.type
+                ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${meta.type === 'bridge' ? 'bg-violet-900/50 text-violet-300' : 'bg-amber-900/50 text-amber-300'}">${meta.type}</span>`
+                : "";
+            const levelBadge = meta.level
+                ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${meta.level === 'hard' ? 'bg-red-900/50 text-red-300' : meta.level === 'medium' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-green-900/50 text-green-300'}">${meta.level}</span>`
+                : "";
+            const supportingHtml = meta.supporting_titles?.length
+                ? `<div class="text-[10px] text-gray-600 mt-1">支撑文章：${meta.supporting_titles.map(t => `<span class="text-gray-500">${escapeHtml(t)}</span>`).join(" · ")}</div>`
+                : "";
+            return `
+                <div class="bg-gray-900/60 border border-gray-700/50 rounded-lg px-3 py-2">
+                    <div class="flex items-start gap-2 mb-1">
+                        <span class="text-xs text-gray-600 shrink-0">Q${i + 1}</span>
+                        <div class="flex-1">
+                            <div class="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                                ${typeBadge}${levelBadge}
+                            </div>
+                            <div class="text-xs text-gray-300">${escapeHtml(s.question)}</div>
+                        </div>
+                    </div>
+                    <div class="text-xs text-emerald-400 font-medium pl-5">答案：${escapeHtml(s.ground_truth)}</div>
+                    ${supportingHtml}
+                </div>
+            `;
+        }).join("");
+    } else {
+        samplesPreviewEl.classList.add("hidden");
+    }
+
+    // 根据是否有 docx 控制批量上传按钮
+    const uploadBtn = document.getElementById("hq-batch-upload-btn");
+    if (!data.docx_files || data.docx_files.length === 0) {
+        uploadBtn.classList.add("hidden");
+    } else {
+        uploadBtn.classList.remove("hidden");
+    }
+}
+
+function loadHotpotQADataset() {
+    if (!state.hotpotqaResult) return;
+    const dsName = state.hotpotqaResult.dataset_name;
+    selectSavedDataset(dsName);
+}
+
+async function uploadHotpotQADocs() {
+    if (!state.hotpotqaResult || !state.hotpotqaResult.docx_files?.length) {
+        showToast("没有可上传的 docx 文件", "error");
+        return;
+    }
+    if (!state.currentKB) {
+        showToast("请先选择知识库", "error");
+        return;
+    }
+
+    const files = state.hotpotqaResult.docx_files;
+    const btn = document.getElementById("hq-batch-upload-btn");
+    btn.disabled = true;
+    btn.innerHTML = `<span class="eval-spinner-sm"></span> 上传中...`;
+
+    showToast(`正在批量上传 ${files.length} 个 docx 文件到知识库...`, "info");
+
+    try {
+        // 通过服务端路径批量上传（调用后端批量接口）
+        // 由于文件在服务端，我们需要通过特殊接口处理
+        // 这里改为提示用户手动选择文件，或调用服务端路径上传接口
+        const res = await fetch(`${API}/evaluations/upload-hotpotqa-docs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                knowledge_base_id: state.currentKB.id,
+                docx_dir: state.hotpotqaResult.docx_dir,
+            }),
+        });
+        const json = await res.json();
+
+        if (json.code === 200 && json.data) {
+            const d = json.data;
+            showToast(`上传完成：成功 ${d.success}，失败 ${d.failed}，跳过 ${d.skipped}`, d.failed > 0 ? "info" : "success");
+            await loadDocuments();
+            await loadKnowledgeBases();
+        } else {
+            showToast(json.message || "上传失败", "error");
+        }
+    } catch (e) {
+        showToast("上传失败: " + e.message, "error");
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = `<svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg> 批量上传 docx 到知识库`;
 }
 
 // ==================== 评估数据集生成 ====================
@@ -835,6 +1146,7 @@ async function generateDataset() {
             state.evalDataset = json.data.samples.map(s => ({
                 question: s.question,
                 ground_truth: s.ground_truth,
+                metadata: s.metadata || {},
             }));
             renderDatasetTable();
             loadSavedDatasets();
@@ -875,15 +1187,20 @@ function renderDatasetTable() {
     if (runningCount > 0) infoText += ` · ${runningCount} 条评估中`;
     info.textContent = infoText;
 
+    // 检测是否有 HotpotQA 元数据
+    const hasHotpotMeta = state.evalDataset.some(s => s.metadata?.hotpotqa_id);
+
     tbody.innerHTML = state.evalDataset.map((s, i) => {
         const result = state.evalSingleResults[i];
         const statusHtml = buildSampleStatus(i, result);
         const actionsHtml = buildSampleActions(i, result);
+        const metaHtml = hasHotpotMeta ? buildHotpotMetaBadges(s.metadata) : "";
         return `
             <tr>
                 <td class="text-gray-500">${i + 1}</td>
                 <td class="max-w-xs">
                     <div class="truncate" title="${escapeHtml(s.question)}">${escapeHtml(s.question)}</div>
+                    ${metaHtml}
                 </td>
                 <td class="max-w-sm">
                     <div class="truncate text-gray-400" title="${escapeHtml(s.ground_truth)}">${escapeHtml(s.ground_truth) || '<span class="text-gray-600 italic">未设置</span>'}</div>
@@ -919,6 +1236,26 @@ function buildSampleActions(index, result) {
     const deleteBtn = `<button onclick="removeDatasetSample(${index})" class="text-gray-600 hover:text-red-400 transition text-xs px-1">删除</button>`;
 
     return `<div class="flex items-center justify-center gap-1">${evalBtn}${detailBtn}${deleteBtn}</div>`;
+}
+
+function buildHotpotMetaBadges(metadata) {
+    if (!metadata) return "";
+    const parts = [];
+    if (metadata.type) {
+        const typeColor = metadata.type === "bridge" ? "bg-blue-900/40 text-blue-400 border-blue-800/50" : "bg-purple-900/40 text-purple-400 border-purple-800/50";
+        parts.push(`<span class="inline-block border rounded px-1 py-0 text-[10px] ${typeColor}">${escapeHtml(metadata.type)}</span>`);
+    }
+    if (metadata.level) {
+        const lvlColor = metadata.level === "easy" ? "bg-emerald-900/40 text-emerald-400 border-emerald-800/50"
+            : metadata.level === "medium" ? "bg-amber-900/40 text-amber-400 border-amber-800/50"
+            : "bg-red-900/40 text-red-400 border-red-800/50";
+        parts.push(`<span class="inline-block border rounded px-1 py-0 text-[10px] ${lvlColor}">${escapeHtml(metadata.level)}</span>`);
+    }
+    if (metadata.supporting_titles?.length) {
+        const titles = metadata.supporting_titles.slice(0, 2).map(t => escapeHtml(t)).join(", ");
+        parts.push(`<span class="text-[10px] text-gray-600" title="支撑文章: ${escapeHtml(metadata.supporting_titles.join(', '))}">📎 ${titles}${metadata.supporting_titles.length > 2 ? '...' : ''}</span>`);
+    }
+    return parts.length ? `<div class="flex flex-wrap items-center gap-1 mt-0.5">${parts.join("")}</div>` : "";
 }
 
 function removeDatasetSample(index) {
@@ -963,6 +1300,7 @@ async function runSingleEval(index) {
     if (!state.currentKB) return showToast("请先选择知识库", "error");
     const sample = state.evalDataset[index];
     if (!sample) return;
+    console.log('sample',sample)
 
     state.evalSingleResults[index] = { status: "running" };
     renderDatasetTable();
@@ -975,6 +1313,7 @@ async function runSingleEval(index) {
                 question: sample.question,
                 knowledge_base_id: state.currentKB.id,
                 ground_truth: sample.ground_truth,
+                supporting_titles:sample.metadata.supporting_titles,
             }),
         });
         const json = await res.json();
@@ -1000,15 +1339,16 @@ function showEvalDetail(index) {
 
     const data = result.data;
     const sample = state.evalDataset[index];
+    const scores = data.scores;
 
+    // RAGAS 指标卡片
     const metricsConfig = [
-        { label: "忠实度", value: data.scores.faithfulness },
-        { label: "相关性", value: data.scores.answer_relevancy },
-        { label: "召回率", value: data.scores.context_recall },
-        { label: "正确性", value: data.scores.answer_correctness },
-        { label: "综合", value: data.scores.overall },
+        { label: "忠实度", value: scores.faithfulness },
+        { label: "相关性", value: scores.answer_relevancy },
+        { label: "召回率", value: scores.context_recall },
+        { label: "正确性", value: scores.answer_correctness },
+        { label: "综合", value: scores.overall },
     ];
-
     document.getElementById("detail-scores").innerHTML = metricsConfig.map(m => {
         const tier = getScoreTier(m.value);
         return `
@@ -1019,6 +1359,51 @@ function showEvalDetail(index) {
             </div>
         `;
     }).join("");
+
+    // HotpotQA 官方指标（EM + F1），-1 表示未计算
+    const hotpotMetricsEl = document.getElementById("detail-hotpot-metrics");
+    const hasEM = scores.exact_match !== undefined && scores.exact_match >= 0;
+    const hasF1 = scores.token_f1 !== undefined && scores.token_f1 >= 0;
+    if (hasEM || hasF1) {
+        hotpotMetricsEl.classList.remove("hidden");
+        if (hasEM) {
+            const emPct = (scores.exact_match * 100).toFixed(1);
+            const emTier = getScoreTier(scores.exact_match);
+            document.getElementById("detail-em-card").className = `metric-card ${emTier}`;
+            document.getElementById("detail-em-value").textContent = `${emPct}%`;
+            document.getElementById("detail-em-bar").style.width = `${emPct}%`;
+        }
+        if (hasF1) {
+            const f1Pct = (scores.token_f1 * 100).toFixed(1);
+            const f1Tier = getScoreTier(scores.token_f1);
+            document.getElementById("detail-f1-card").className = `metric-card ${f1Tier}`;
+            document.getElementById("detail-f1-value").textContent = `${f1Pct}%`;
+            document.getElementById("detail-f1-bar").style.width = `${f1Pct}%`;
+        }
+    } else {
+        hotpotMetricsEl.classList.add("hidden");
+    }
+
+    // HotpotQA 样本元信息（type/level/supporting_titles）
+    const meta = sample.metadata || {};
+    const hotpotMetaEl = document.getElementById("detail-hotpot-meta");
+    if (meta.hotpotqa_id) {
+        hotpotMetaEl.classList.remove("hidden");
+        document.getElementById("detail-hq-type").textContent = meta.type || "—";
+        document.getElementById("detail-hq-level").textContent = meta.level || "—";
+        const supportingEl = document.getElementById("detail-hq-supporting");
+        const supportingListEl = document.getElementById("detail-hq-supporting-list");
+        if (meta.supporting_titles?.length) {
+            supportingEl.classList.remove("hidden");
+            supportingListEl.innerHTML = meta.supporting_titles.map(t =>
+                `<span class="px-2 py-0.5 bg-violet-900/40 border border-violet-700/40 rounded text-[10px] text-violet-300">${escapeHtml(t)}</span>`
+            ).join("");
+        } else {
+            supportingEl.classList.add("hidden");
+        }
+    } else {
+        hotpotMetaEl.classList.add("hidden");
+    }
 
     document.getElementById("detail-question").textContent = data.question;
     document.getElementById("detail-answer").innerHTML = renderMarkdown(data.answer);
@@ -1035,12 +1420,26 @@ function showEvalDetail(index) {
     const ctxContainer = document.getElementById("detail-contexts");
     if (data.contexts && data.contexts.length > 0) {
         ctxSection.classList.remove("hidden");
-        ctxContainer.innerHTML = data.contexts.map((ctx, i) => `
-            <div class="bg-gray-800/70 border border-gray-700/50 rounded-lg p-3 text-xs text-gray-400">
-                <span class="text-gray-500 font-medium">片段 ${i + 1}</span>
-                <p class="mt-1 whitespace-pre-wrap">${escapeHtml(ctx)}</p>
-            </div>
-        `).join("");
+        // 高亮支撑文章（若有 supporting_titles 元信息）
+        const supportingTitles = meta.supporting_titles || [];
+        ctxContainer.innerHTML = data.contexts.map((ctx, i) => {
+            // 尝试从 context 文本开头提取标题（格式：标题\n内容）
+            const lines = ctx.split("\n");
+            const title = lines[0] || `片段 ${i + 1}`;
+            const isSupporting = supportingTitles.some(t => ctx.includes(t) || title.includes(t));
+            const borderClass = isSupporting ? "border-violet-600/50" : "border-gray-700/50";
+            const titleBadge = isSupporting
+                ? `<span class="ml-2 px-1 py-0.5 bg-violet-900/50 text-violet-300 text-[9px] rounded">支撑文章</span>`
+                : "";
+            return `
+                <div class="bg-gray-800/70 border ${borderClass} rounded-lg p-3 text-xs text-gray-400">
+                    <div class="flex items-center mb-1">
+                        <span class="text-gray-500 font-medium">片段 ${i + 1}</span>${titleBadge}
+                    </div>
+                    <p class="whitespace-pre-wrap">${escapeHtml(ctx)}</p>
+                </div>
+            `;
+        }).join("");
     } else {
         ctxSection.classList.add("hidden");
     }
@@ -1456,4 +1855,279 @@ function showToast(message, type = "info") {
     toast.classList.remove("hidden");
 
     setTimeout(() => toast.classList.add("hidden"), 3000);
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// 评估历史记录
+// ══════════════════════════════════════════════════════════════════════
+
+/** 当前选中用于对比的 run_id 列表（最多 2 条） */
+let _selectedRunIds = [];
+
+/** 加载评估历史列表 */
+async function loadEvalHistory() {
+    const tbody = document.getElementById('eval-history-tbody');
+    tbody.innerHTML = '<tr><td colspan="12" class="text-center py-6 text-gray-500 text-xs">加载中...</td></tr>';
+
+    try {
+        const res = await fetch('/api/v1/evaluations/history?limit=50');
+        const json = await res.json();
+        const runs = json.data || [];
+
+        if (runs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="12" class="text-center py-8 text-gray-600 text-xs">暂无评估历史</td></tr>';
+            return;
+        }
+
+        _selectedRunIds = [];
+        _updateCompareBtn();
+
+        tbody.innerHTML = runs.map((r, idx) => {
+            const fmt = v => (v === null || v === undefined) ? '<span class="text-gray-600">—</span>' : `<span class="${_scoreColor(v)}">${(v * 100).toFixed(1)}%</span>`;
+            const typeBadge = r.run_type === 'batch'
+                ? '<span class="px-1.5 py-0.5 bg-blue-900/40 text-blue-400 rounded text-xs">批量</span>'
+                : '<span class="px-1.5 py-0.5 bg-violet-900/40 text-violet-400 rounded text-xs">单条</span>';
+            const timeStr = r.created_at ? new Date(r.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+            return `<tr class="border-t border-gray-800 hover:bg-gray-800/40 transition cursor-pointer" data-run-id="${r.run_id}">
+                <td class="px-3 py-2 text-center">
+                    <input type="checkbox" class="history-check accent-emerald-500 cursor-pointer" data-run-id="${r.run_id}" onchange="toggleRunSelect(this)" onclick="event.stopPropagation()">
+                </td>
+                <td class="px-3 py-2 text-gray-200 max-w-[160px] truncate" title="${r.name}">${r.name || '—'}</td>
+                <td class="px-3 py-2">${typeBadge}</td>
+                <td class="px-3 py-2 text-center text-gray-300">${r.total_samples}</td>
+                <td class="px-3 py-2 text-center">${fmt(r.avg_faithfulness)}</td>
+                <td class="px-3 py-2 text-center">${fmt(r.avg_answer_relevancy)}</td>
+                <td class="px-3 py-2 text-center">${fmt(r.avg_context_recall)}</td>
+                <td class="px-3 py-2 text-center">${fmt(r.avg_answer_correctness)}</td>
+                <td class="px-3 py-2 text-center">${fmt(r.avg_exact_match)}</td>
+                <td class="px-3 py-2 text-center">${fmt(r.avg_token_f1)}</td>
+                <td class="px-3 py-2 text-gray-500">${timeStr}</td>
+                <td class="px-3 py-2 text-center">
+                    <button class="text-gray-500 hover:text-red-400 transition" title="删除" onclick="deleteEvalRun('${r.run_id}', event)">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+
+        // 行点击展开详情
+        tbody.querySelectorAll('tr[data-run-id]').forEach(tr => {
+            tr.addEventListener('click', () => showEvalRunDetail(tr.dataset.runId));
+        });
+
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="12" class="text-center py-6 text-red-400 text-xs">加载失败：${e.message}</td></tr>`;
+    }
+}
+
+/** 根据分数返回颜色 class */
+function _scoreColor(v) {
+    if (v >= 0.7) return 'text-emerald-400 font-medium';
+    if (v >= 0.4) return 'text-yellow-400';
+    return 'text-red-400';
+}
+
+/** 勾选/取消勾选 run，维护对比列表 */
+function toggleRunSelect(checkbox) {
+    const runId = checkbox.dataset.runId;
+    if (checkbox.checked) {
+        if (_selectedRunIds.length >= 2) {
+            checkbox.checked = false;
+            showToast('最多选择 2 条进行对比', 'warning');
+            return;
+        }
+        _selectedRunIds.push(runId);
+    } else {
+        _selectedRunIds = _selectedRunIds.filter(id => id !== runId);
+    }
+    _updateCompareBtn();
+}
+
+function _updateCompareBtn() {
+    const btn = document.getElementById('compare-btn');
+    if (!btn) return;
+    if (_selectedRunIds.length === 2) {
+        btn.classList.remove('hidden');
+        btn.disabled = false;
+    } else if (_selectedRunIds.length < 2) {
+        btn.classList.toggle('hidden', _selectedRunIds.length === 0);
+        btn.disabled = true;
+    }
+}
+
+/** 展示单次评估详情 Modal */
+async function showEvalRunDetail(runId) {
+    const modal = document.getElementById('eval-history-modal');
+    const body = document.getElementById('history-modal-body');
+    const title = document.getElementById('history-modal-title');
+    const subtitle = document.getElementById('history-modal-subtitle');
+
+    body.innerHTML = '<div class="text-center py-10 text-gray-500 text-xs">加载中...</div>';
+    modal.classList.remove('hidden');
+
+    try {
+        const res = await fetch(`/api/v1/evaluations/history/${runId}`);
+        const json = await res.json();
+        const d = json.data;
+
+        title.textContent = d.name || '评估详情';
+        subtitle.textContent = `${d.run_type === 'batch' ? '批量' : '单条'} · ${d.total_samples} 条样本 · ${new Date(d.created_at).toLocaleString('zh-CN')}`;
+
+        const fmt = v => (v === null || v === undefined) ? '—' : `<span class="${_scoreColor(v)}">${(v * 100).toFixed(1)}%</span>`;
+
+        // 汇总指标
+        const summaryHtml = `
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-5">
+            ${[
+                ['忠实度', d.avg_faithfulness],
+                ['相关性', d.avg_answer_relevancy],
+                ['召回率', d.avg_context_recall],
+                ['正确性', d.avg_answer_correctness],
+                ['EM', d.avg_exact_match],
+                ['F1', d.avg_token_f1],
+            ].map(([label, val]) => `
+            <div class="bg-gray-800 rounded-lg p-2.5 text-center">
+                <div class="text-xs text-gray-500 mb-1">${label}</div>
+                <div class="text-sm font-semibold">${fmt(val)}</div>
+            </div>`).join('')}
+        </div>`;
+
+        // 明细表格
+        const rowsHtml = d.items.map((it, i) => `
+        <tr class="border-t border-gray-800 hover:bg-gray-800/30 transition">
+            <td class="px-3 py-2 text-gray-500">${i + 1}</td>
+            <td class="px-3 py-2 text-gray-200 max-w-[200px]">
+                <div class="truncate" title="${it.question}">${it.question}</div>
+                ${it.ground_truth ? `<div class="text-gray-500 truncate mt-0.5" title="${it.ground_truth}">标准：${it.ground_truth}</div>` : ''}
+            </td>
+            <td class="px-3 py-2 text-gray-300 max-w-[200px]">
+                <div class="truncate" title="${it.answer}">${it.answer || '—'}</div>
+            </td>
+            <td class="px-3 py-2 text-center text-xs">${fmt(it.faithfulness)}</td>
+            <td class="px-3 py-2 text-center text-xs">${fmt(it.answer_relevancy)}</td>
+            <td class="px-3 py-2 text-center text-xs">${fmt(it.context_recall)}</td>
+            <td class="px-3 py-2 text-center text-xs">${fmt(it.answer_correctness)}</td>
+            <td class="px-3 py-2 text-center text-xs">${fmt(it.overall_score)}</td>
+            <td class="px-3 py-2 text-center text-xs">${fmt(it.exact_match)}</td>
+            <td class="px-3 py-2 text-center text-xs">${fmt(it.token_f1)}</td>
+        </tr>`).join('');
+
+        body.innerHTML = summaryHtml + `
+        <div class="overflow-x-auto rounded-lg border border-gray-800 max-h-[50vh] overflow-y-auto">
+            <table class="w-full text-xs">
+                <thead class="bg-gray-800/80 sticky top-0">
+                    <tr>
+                        <th class="text-left px-3 py-2 text-gray-400 w-8">#</th>
+                        <th class="text-left px-3 py-2 text-gray-400">问题 / 标准答案</th>
+                        <th class="text-left px-3 py-2 text-gray-400">RAG 回答</th>
+                        <th class="text-center px-3 py-2 text-gray-400 w-14">忠实度</th>
+                        <th class="text-center px-3 py-2 text-gray-400 w-14">相关性</th>
+                        <th class="text-center px-3 py-2 text-gray-400 w-14">召回率</th>
+                        <th class="text-center px-3 py-2 text-gray-400 w-14">正确性</th>
+                        <th class="text-center px-3 py-2 text-gray-400 w-14">综合</th>
+                        <th class="text-center px-3 py-2 text-gray-400 w-10">EM</th>
+                        <th class="text-center px-3 py-2 text-gray-400 w-10">F1</th>
+                    </tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+            </table>
+        </div>`;
+    } catch (e) {
+        body.innerHTML = `<div class="text-center py-10 text-red-400 text-xs">加载失败：${e.message}</div>`;
+    }
+}
+
+function closeHistoryModal() {
+    document.getElementById('eval-history-modal').classList.add('hidden');
+}
+
+/** 对比两条选中的 EvalRun */
+async function compareSelectedRuns() {
+    if (_selectedRunIds.length !== 2) return;
+    const [a, b] = _selectedRunIds;
+    const modal = document.getElementById('eval-compare-modal');
+    const body = document.getElementById('compare-modal-body');
+
+    body.innerHTML = '<div class="text-center py-10 text-gray-500 text-xs">加载中...</div>';
+    modal.classList.remove('hidden');
+
+    try {
+        const res = await fetch(`/api/v1/evaluations/history/compare/${a}/${b}`);
+        const json = await res.json();
+        const { run_a, run_b, delta } = json.data;
+
+        const fmt = v => (v === null || v === undefined) ? '—' : `${(v * 100).toFixed(1)}%`;
+        const fmtDelta = v => {
+            if (v === null || v === undefined) return '<span class="text-gray-600">—</span>';
+            const sign = v > 0 ? '+' : '';
+            const cls = v > 0.005 ? 'text-emerald-400' : v < -0.005 ? 'text-red-400' : 'text-gray-400';
+            return `<span class="${cls}">${sign}${(v * 100).toFixed(1)}%</span>`;
+        };
+
+        const metrics = [
+            ['忠实度', 'avg_faithfulness'],
+            ['答案相关性', 'avg_answer_relevancy'],
+            ['上下文召回', 'avg_context_recall'],
+            ['答案正确性', 'avg_answer_correctness'],
+            ['Exact Match', 'avg_exact_match'],
+            ['Token F1', 'avg_token_f1'],
+        ];
+
+        body.innerHTML = `
+        <div class="grid grid-cols-3 gap-3 mb-4 text-xs text-center">
+            <div class="bg-gray-800 rounded-lg p-3">
+                <div class="text-gray-500 mb-1">Run A</div>
+                <div class="text-white font-medium truncate" title="${run_a.name}">${run_a.name || run_a.run_id.slice(0, 8)}</div>
+                <div class="text-gray-600 mt-0.5">${new Date(run_a.created_at).toLocaleDateString('zh-CN')}</div>
+            </div>
+            <div class="flex items-center justify-center text-gray-500 font-bold text-lg">VS</div>
+            <div class="bg-gray-800 rounded-lg p-3">
+                <div class="text-gray-500 mb-1">Run B</div>
+                <div class="text-white font-medium truncate" title="${run_b.name}">${run_b.name || run_b.run_id.slice(0, 8)}</div>
+                <div class="text-gray-600 mt-0.5">${new Date(run_b.created_at).toLocaleDateString('zh-CN')}</div>
+            </div>
+        </div>
+        <div class="rounded-lg border border-gray-800 overflow-hidden">
+            <table class="w-full text-xs">
+                <thead class="bg-gray-800/80">
+                    <tr>
+                        <th class="text-left px-4 py-2.5 text-gray-400 font-medium">指标</th>
+                        <th class="text-center px-4 py-2.5 text-gray-400 font-medium">Run A</th>
+                        <th class="text-center px-4 py-2.5 text-gray-400 font-medium">Run B</th>
+                        <th class="text-center px-4 py-2.5 text-gray-400 font-medium">差值 (B−A)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${metrics.map(([label, key]) => `
+                    <tr class="border-t border-gray-800">
+                        <td class="px-4 py-2.5 text-gray-300">${label}</td>
+                        <td class="px-4 py-2.5 text-center ${_scoreColor(run_a[key])}">${fmt(run_a[key])}</td>
+                        <td class="px-4 py-2.5 text-center ${_scoreColor(run_b[key])}">${fmt(run_b[key])}</td>
+                        <td class="px-4 py-2.5 text-center">${fmtDelta(delta[key])}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+        </div>`;
+    } catch (e) {
+        body.innerHTML = `<div class="text-center py-10 text-red-400 text-xs">加载失败：${e.message}</div>`;
+    }
+}
+
+function closeCompareModal() {
+    document.getElementById('eval-compare-modal').classList.add('hidden');
+}
+
+/** 删除一条评估历史 */
+async function deleteEvalRun(runId, event) {
+    event.stopPropagation();
+    if (!confirm('确认删除这条评估记录？此操作不可恢复。')) return;
+    try {
+        const res = await fetch(`/api/v1/evaluations/history/${runId}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text());
+        showToast('已删除', 'success');
+        loadEvalHistory();
+    } catch (e) {
+        showToast(`删除失败：${e.message}`, 'error');
+    }
 }

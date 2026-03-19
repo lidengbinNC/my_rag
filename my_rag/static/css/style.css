@@ -440,6 +440,15 @@
     background: #34d399;
 }
 
+/* ===== HotpotQA 导入进度 ===== */
+#hotpotqa-loading {
+    display: flex;
+    align-items: center;
+}
+#hotpotqa-loading.hidden {
+    display: none;
+}
+
 /* ===== 加载动画 ===== */
 .dot-pulse {
     display: inline-flex;

@@ -82,10 +82,10 @@ class RetrievalSettings(BaseSettings):
     rrf_k: int = 60
     enable_hyde: bool = False
     enable_multi_query: bool = False
-    enable_cache: bool = True
+    enable_cache: bool = False
     cache_similarity_threshold: float = 0.92
     cache_ttl_seconds: int = 3600
-    enable_rerank: bool = False
+    enable_rerank: bool = True
     rerank_provider: str = "cross_encoder"
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_k: int = 5

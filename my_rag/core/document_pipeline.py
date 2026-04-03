@@ -32,6 +32,15 @@ from my_rag.utils.metrics import DOC_PROCESS_DURATION, DOC_CHUNK_COUNT, EMBEDDIN
 logger = get_logger(__name__)
 
 
+def _should_use_milvus_hybrid(embedding, vector_store) -> bool:
+    return (
+        settings.vector_store.provider == "milvus"
+        and settings.retrieval.enable_milvus_hybrid
+        and embedding.supports_sparse
+        and vector_store.supports_hybrid
+    )
+
+
 async def process_document(document_id: str) -> None:
     """
     后台文档处理入口
@@ -92,11 +101,11 @@ async def process_document(document_id: str) -> None:
             )
 
             # === Embedding + 向量索引 ===
-            from my_rag.core.dependencies import get_embedding, get_vector_store, get_sparse_retriever
+            from my_rag.core.dependencies import get_embedding, get_vector_store
 
             embedding = get_embedding()
             vector_store = get_vector_store()
-            sparse_retriever = get_sparse_retriever()
+            use_milvus_hybrid = _should_use_milvus_hybrid(embedding, vector_store)
 
             chunk_ids = [str(uuid.uuid4()) for _ in text_chunks]
             chunk_texts = [tc.content for tc in text_chunks]
@@ -109,19 +118,31 @@ async def process_document(document_id: str) -> None:
                 for _ in text_chunks
             ]
 
-            embeddings = await embedding.embed_documents(chunk_texts)
+            if use_milvus_hybrid:
+                dense_embeddings, sparse_embeddings = await embedding.embed_documents_hybrid(chunk_texts)
+                await vector_store.add_hybrid(
+                    ids=chunk_ids,
+                    embeddings=dense_embeddings,
+                    sparse_embeddings=sparse_embeddings,
+                    texts=chunk_texts,
+                    metadatas=chunk_metadatas,
+                )
+                embedding_count = len(dense_embeddings)
+            else:
+                embeddings = await embedding.embed_documents(chunk_texts)
+                await vector_store.add(
+                    ids=chunk_ids,
+                    embeddings=embeddings,
+                    texts=chunk_texts,
+                    metadatas=chunk_metadatas,
+                )
+                embedding_count = len(embeddings)
 
             logger.info(
                 "document_embedded",
                 document_id=document_id,
-                chunk_count=len(embeddings),
-            )
-
-            await vector_store.add(
-                ids=chunk_ids,
-                embeddings=embeddings,
-                texts=chunk_texts,
-                metadatas=chunk_metadatas,
+                chunk_count=embedding_count,
+                hybrid=use_milvus_hybrid,
             )
             VECTOR_STORE_SIZE.set(vector_store.count())
 
@@ -147,23 +168,6 @@ async def process_document(document_id: str) -> None:
                 kb.updated_at = datetime.now()
 
             await session.commit()
-
-            # BM25 增量追加：commit 之后执行，无需查 DB，直接用本次已处理的 chunk
-            # 面试考点：增量追加 vs 全量重建
-            #   - 旧做法：每次 commit 前查全表 SELECT * FROM chunks，对所有 chunk 重新分词
-            #   - 新做法：只对本次新增的 chunk 分词并追加，O(新增) 而非 O(全量)
-            #   - 启动时仍用 _rebuild_bm25_index 从 DB 全量恢复（冷启动场景）
-            new_bm25_chunks = [
-                {
-                    "id": chunk_ids[i],
-                    "content": tc.content,
-                    "source": doc.filename,
-                    "document_id": doc.id,
-                    "knowledge_base_id": doc.knowledge_base_id,
-                }
-                for i, tc in enumerate(text_chunks)
-            ]
-            sparse_retriever.add_chunks(new_bm25_chunks)
 
             DOC_PROCESS_DURATION.observe(time.perf_counter() - _start)
             DOC_CHUNK_COUNT.observe(len(text_chunks))
@@ -223,7 +227,7 @@ async def batch_ingest_documents(
     concurrency: int = 4,
 ) -> IngestProgress:
     """
-    批量处理多篇文档：Parse → Chunk → 合并 Embed → 写 Milvus/MySQL/BM25
+    批量处理多篇文档：Parse → Chunk → 合并 Embed → 写 Milvus/MySQL
 
     优化点（相比逐篇调用 process_document）：
     1. 所有文档的 chunk 合并为一次 embed_documents 调用，消除 BGE-M3 每次推理的固定启动开销
@@ -239,11 +243,11 @@ async def batch_ingest_documents(
     progress = IngestProgress(task_id=task_id, total=len(doc_ids))
     _ingest_progress[task_id] = progress
 
-    from my_rag.core.dependencies import get_embedding, get_vector_store, get_sparse_retriever
+    from my_rag.core.dependencies import get_embedding, get_vector_store
 
     embedding = get_embedding()
     vector_store = get_vector_store()
-    sparse_retriever = get_sparse_retriever()
+    use_milvus_hybrid = _should_use_milvus_hybrid(embedding, vector_store)
 
     # ── 阶段 1：并发 Parse + Chunk，收集所有 chunk ──────────────────────
     # 每篇文档独立 parse/chunk（CPU 密集，用 Semaphore 限制并发）
@@ -338,14 +342,11 @@ async def batch_ingest_documents(
     all_texts: list[str] = []
     all_ids: list[str] = []
     all_metadatas: list[dict] = []
-    doc_chunk_ranges: list[tuple[str, int, int]] = []  # (doc_id, start_idx, end_idx)
 
     for r in valid_results:
-        start = len(all_texts)
         all_texts.extend(r.chunk_texts)
         all_ids.extend(r.chunk_ids)
         all_metadatas.extend(r.chunk_metadatas)
-        doc_chunk_ranges.append((r.doc_id, start, len(all_texts)))
 
     logger.info(
         "batch_ingest_embed_start",
@@ -355,7 +356,10 @@ async def batch_ingest_documents(
     )
 
     try:
-        all_embeddings = await embedding.embed_documents(all_texts)
+        if use_milvus_hybrid:
+            all_dense_embeddings, all_sparse_embeddings = await embedding.embed_documents_hybrid(all_texts)
+        else:
+            all_embeddings = await embedding.embed_documents(all_texts)
     except Exception as e:
         logger.error("batch_ingest_embed_failed", task_id=task_id, error=str(e))
         progress.failed += len(valid_results)
@@ -366,12 +370,22 @@ async def batch_ingest_documents(
 
     # ── 阶段 3：写 Milvus（一次批量 upsert）──────────────────────────────
     try:
-        await vector_store.add(
-            ids=all_ids,
-            embeddings=all_embeddings,
-            texts=all_texts,
-            metadatas=all_metadatas,
-        )
+        if use_milvus_hybrid:
+            await vector_store.add_hybrid(
+                ids=all_ids,
+                embeddings=all_dense_embeddings,
+                sparse_embeddings=all_sparse_embeddings,
+                texts=all_texts,
+                metadatas=all_metadatas,
+            )
+        else:
+            all_embeddings = await embedding.embed_documents(all_texts)
+            await vector_store.add(
+                ids=all_ids,
+                embeddings=all_embeddings,
+                texts=all_texts,
+                metadatas=all_metadatas,
+            )
         VECTOR_STORE_SIZE.set(vector_store.count())
     except Exception as e:
         logger.error("batch_ingest_vector_store_failed", task_id=task_id, error=str(e))
@@ -382,12 +396,9 @@ async def batch_ingest_documents(
         return progress
 
     # ── 阶段 4：逐文档写 MySQL Chunk 表 + 更新 Document 状态 ─────────────
-    bm25_chunks_all: list[dict] = []
 
     for r in valid_results:
         doc_id = r.doc_id
-        start, end = next((s, e) for (d, s, e) in doc_chunk_ranges if d == doc_id)
-        doc_embeddings_slice = all_embeddings[start:end]
 
         try:
             async with async_session_factory() as session:
@@ -418,27 +429,12 @@ async def batch_ingest_documents(
 
                 await session.commit()
 
-            bm25_chunks_all.extend([
-                {
-                    "id": r.chunk_ids[i],
-                    "content": tc.content,
-                    "source": doc.filename,
-                    "document_id": doc.id,
-                    "knowledge_base_id": doc.knowledge_base_id,
-                }
-                for i, tc in enumerate(r.text_chunks)
-            ])
-
             progress.done += 1
             DOC_CHUNK_COUNT.observe(len(r.text_chunks))
 
         except Exception as e:
             logger.error("batch_ingest_db_write_failed", doc_id=doc_id, error=str(e))
             progress.failed += 1
-
-    # ── 阶段 5：BM25 批量追加（一次性，避免多次 add_chunks 重建）──────────
-    if bm25_chunks_all:
-        sparse_retriever.add_chunks(bm25_chunks_all)
 
     EMBEDDING_BATCH_SIZE.observe(len(all_texts))
     progress.status = "completed"
@@ -455,35 +451,3 @@ async def batch_ingest_documents(
     return progress
 
 
-async def _rebuild_bm25_index(session, sparse_retriever) -> None:
-    """
-    冷启动时从 DB 全量重建 BM25 索引。
-
-    调用时机：
-    - 应用启动（main.py lifespan）：进程重启后内存索引丢失，需从 DB 恢复
-    - 不在每次文档处理后调用（改为增量追加 sparse_retriever.add_chunks）
-
-    面试考点（正排索引 vs 倒排索引）：
-    - 正排索引：doc_id → [term1, term2, ...]，适合
-    "给定文档，查它包含哪些词"
-    - 倒排索引：term → [doc_id1, doc_id2, ...]，适合"给定关键词，查哪些文档包含它"
-    - BM25 基于倒排索引，rank_bm25 在内存中维护词频矩阵，本质是稠密倒排索引
-    """
-    from sqlalchemy import select
-
-    result = await session.execute(select(Chunk))
-    all_chunks = result.scalars().all()
-
-    corpus = [
-        {
-            "id": c.id,
-            "content": c.content,
-            "source": json.loads(c.metadata_json).get("source", "") if c.metadata_json else "",
-            "document_id": c.document_id,
-            "knowledge_base_id": c.knowledge_base_id,
-        }
-        for c in all_chunks
-    ]
-
-    sparse_retriever.build_index(corpus)
-    logger.info("bm25_index_rebuilt", total_chunks=len(corpus))

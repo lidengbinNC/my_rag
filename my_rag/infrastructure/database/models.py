@@ -66,6 +66,29 @@ class KnowledgeBase(Base):
     )
 
 
+class KnowledgeBaseProfile(Base):
+    __tablename__ = "knowledge_base_profiles"
+    __table_args__ = (
+        Index("idx_kb_profile_domain", "domain"),
+        _MYSQL_TABLE_KWARGS,
+    )
+
+    knowledge_base_id: Mapped[str] = mapped_column(
+        String(_UUID_LEN), ForeignKey("knowledge_bases.id"), primary_key=True
+    )
+    domain: Mapped[str] = mapped_column(String(64), default="general")
+    visibility: Mapped[str] = mapped_column(String(32), default="internal")
+    language: Mapped[str] = mapped_column(String(32), default="zh-CN")
+    tags_json: Mapped[str | None] = mapped_column(Text, default=None)
+    allowed_roles_json: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
+
+    knowledge_base: Mapped["KnowledgeBase"] = relationship()
+
+
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (

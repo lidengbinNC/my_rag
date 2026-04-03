@@ -231,6 +231,46 @@ class RAGPipeline:
             retried=retried,
         )
 
+    async def search(
+        self,
+        query: str,
+        knowledge_base_id: str,
+        top_k: int = 5,
+    ) -> list[RetrievalResult]:
+        """执行 retrieval-only 检索，供外部 Agent / 客服编排层调用。"""
+        with Trace().span("rag_search", query=query[:50]):
+            _ret_start = time.perf_counter()
+            sources = await self._retrieve_with_rewrite(query, top_k, knowledge_base_id)
+            _ret_dur = time.perf_counter() - _ret_start
+            prom.RETRIEVAL_COUNT.labels(retriever_type=self._retriever_type).inc()
+            prom.RETRIEVAL_DURATION.labels(retriever_type=self._retriever_type).observe(_ret_dur)
+            prom.RETRIEVAL_DOCS.observe(len(sources))
+
+            if self._reranker and sources:
+                _rerank_start = time.perf_counter()
+                rerank_results = await self._reranker.rerank(
+                    query,
+                    sources,
+                    top_k=min(top_k, self._rerank_top_k),
+                )
+                _rerank_dur = time.perf_counter() - _rerank_start
+                prom.RERANK_DURATION.labels(reranker_type=self._reranker_type).observe(_rerank_dur)
+                prom.RERANK_INPUT_DOCS.observe(len(sources))
+                prom.RERANK_OUTPUT_DOCS.observe(len(rerank_results))
+                sources = [
+                    RetrievalResult(
+                        chunk_id=rr.chunk_id,
+                        content=rr.content,
+                        score=rr.score,
+                        source=rr.source,
+                        metadata=rr.metadata or {},
+                    )
+                    for rr in rerank_results
+                ]
+
+            logger.info("rag_search_done", query=query[:50], source_count=len(sources))
+            return sources[:top_k]
+
     async def stream(
         self,
         query: str,

@@ -27,18 +27,26 @@ from my_rag.infrastructure.database.models import Base
 
 _db_url = settings.database.url
 
-# MySQL 异步引擎配置
-# pool_recycle=3600 确保连接在 MySQL wait_timeout（默认 8h）之前被回收
-engine = create_async_engine(
-    _db_url,
-    echo=settings.database.echo,
-    future=True,
-    pool_size=settings.database.pool_size,
-    max_overflow=settings.database.max_overflow,
-    pool_timeout=settings.database.pool_timeout,
-    pool_recycle=settings.database.pool_recycle,
-    pool_pre_ping=True,          # 自动探活，防止 MySQL 断开空闲连接后报错
-)
+if _db_url.startswith("sqlite"):
+    engine = create_async_engine(
+        _db_url,
+        echo=settings.database.echo,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    # MySQL 异步引擎配置
+    # pool_recycle=3600 确保连接在 MySQL wait_timeout（默认 8h）之前被回收
+    engine = create_async_engine(
+        _db_url,
+        echo=settings.database.echo,
+        future=True,
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+        pool_timeout=settings.database.pool_timeout,
+        pool_recycle=settings.database.pool_recycle,
+        pool_pre_ping=True,          # 自动探活，防止 MySQL 断开空闲连接后报错
+    )
 
 async_session_factory = async_sessionmaker(
     engine,

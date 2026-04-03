@@ -85,6 +85,11 @@ class RetrievalSettings(BaseSettings):
     enable_cache: bool = False
     cache_similarity_threshold: float = 0.92
     cache_ttl_seconds: int = 3600
+    enable_milvus_hybrid: bool = True
+    hybrid_ranker: str = "weighted"
+    hybrid_dense_weight: float = 0.5
+    hybrid_sparse_weight: float = 0.5
+    hybrid_candidate_limit: int = 20
     enable_rerank: bool = True
     rerank_provider: str = "cross_encoder"
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
@@ -156,6 +161,16 @@ class DingTalkSettings(BaseSettings):
     secret: str = ""
 
 
+class IntegrationSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE), env_file_encoding="utf-8",
+        env_prefix="INTEGRATION_", extra="ignore",
+    )
+
+    agent_api_key: str = ""
+    search_result_max_chars: int = 800
+
+
 class Settings(BaseSettings):
     """全局配置聚合"""
 
@@ -173,6 +188,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = StorageSettings()
     vector_store: VectorStoreSettings = VectorStoreSettings()
     dingtalk: DingTalkSettings = DingTalkSettings()
+    integration: IntegrationSettings = IntegrationSettings()
 
     @property
     def base_dir(self) -> Path:

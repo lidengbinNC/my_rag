@@ -5,6 +5,7 @@
 - 向量数据库的核心操作：add / search / delete
 - 相似度度量：cosine / L2 / inner product
 - 元数据过滤：在向量检索基础上施加标量条件过滤
+- Hybrid Search：Dense + Sparse 统一写入与混合召回
 """
 
 from abc import ABC, abstractmethod
@@ -22,6 +23,10 @@ class VectorSearchResult:
 
 class BaseVectorStore(ABC):
 
+    @property
+    def supports_hybrid(self) -> bool:
+        return False
+
     @abstractmethod
     async def add(
         self,
@@ -33,6 +38,16 @@ class BaseVectorStore(ABC):
         """批量添加向量"""
         ...
 
+    async def add_hybrid(
+        self,
+        ids: list[str],
+        embeddings: list[list[float]],
+        sparse_embeddings: list[dict[int, float]],
+        texts: list[str],
+        metadatas: list[dict] | None = None,
+    ) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support hybrid upsert")
+
     @abstractmethod
     async def search(
         self,
@@ -42,6 +57,20 @@ class BaseVectorStore(ABC):
     ) -> list[VectorSearchResult]:
         """向量相似度检索"""
         ...
+
+    async def search_hybrid(
+        self,
+        query_embedding: list[float],
+        query_sparse_embedding: dict[int, float],
+        top_k: int = 5,
+        filter_metadata: dict | None = None,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.5,
+        ranker: str = "weighted",
+        candidate_limit: int | None = None,
+        rrf_k: int = 60,
+    ) -> list[VectorSearchResult]:
+        raise NotImplementedError(f"{type(self).__name__} does not support hybrid search")
 
     @abstractmethod
     async def delete(self, ids: list[str]) -> None:

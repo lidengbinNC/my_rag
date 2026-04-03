@@ -59,6 +59,10 @@ class FakeEmbedding(BaseEmbedding):
     def dimension(self) -> int:
         return self._dim
 
+    @property
+    def supports_sparse(self) -> bool:
+        return True
+
     def _embed(self, text: str) -> list[float]:
         import hashlib
         h = hashlib.md5(text.encode()).hexdigest()
@@ -71,6 +75,18 @@ class FakeEmbedding(BaseEmbedding):
 
     async def embed_query(self, text: str) -> list[float]:
         return self._embed(text)
+
+    async def embed_documents_hybrid(
+        self, texts: list[str]
+    ) -> tuple[list[list[float]], list[dict[int, float]]]:
+        dense = await self.embed_documents(texts)
+        sparse = [{i: value for i, value in enumerate(vec) if value > 0} for vec in dense]
+        return dense, sparse
+
+    async def embed_query_hybrid(self, text: str) -> tuple[list[float], dict[int, float]]:
+        dense = await self.embed_query(text)
+        sparse = {i: value for i, value in enumerate(dense) if value > 0}
+        return dense, sparse
 
 
 # ── Fake Retriever ──────────────────────────────────────────────────

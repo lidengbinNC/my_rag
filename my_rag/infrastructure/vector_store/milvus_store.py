@@ -58,6 +58,7 @@ logger = get_logger(__name__)
 # Milvus 字段名常量，避免魔法字符串
 _FIELD_ID = "chunk_id"
 _FIELD_EMBEDDING = "embedding"
+_FIELD_SPARSE_EMBEDDING = "sparse_embedding"
 _FIELD_CONTENT = "content"
 _FIELD_KB_ID = "knowledge_base_id"
 _FIELD_DOC_ID = "document_id"
@@ -85,6 +86,7 @@ class MilvusVectorStore(BaseVectorStore):
         self,
         collection_name: str,
         dimension: int,
+        enable_sparse_hybrid: bool = False,
         host: str = "localhost",
         port: int = 19530,
         user: str = "",
@@ -100,6 +102,7 @@ class MilvusVectorStore(BaseVectorStore):
     ):
         self._collection_name = collection_name
         self._dimension = dimension
+        self._enable_sparse_hybrid = enable_sparse_hybrid
         self._host = host
         self._port = port
         self._user = user
@@ -115,6 +118,11 @@ class MilvusVectorStore(BaseVectorStore):
 
         self._collection: Any = None  # pymilvus.Collection
         self._initialized = False
+        self._has_sparse_field = False
+
+    @property
+    def supports_hybrid(self) -> bool:
+        return self._enable_sparse_hybrid
 
     # ── 连接与 Collection 初始化 ─────────────────────────────────────────
 
@@ -166,6 +174,18 @@ class MilvusVectorStore(BaseVectorStore):
                 dim=self._dimension,
                 description="Chunk embedding vector",
             ),
+        ]
+
+        if self._enable_sparse_hybrid:
+            fields.append(
+                FieldSchema(
+                    name=_FIELD_SPARSE_EMBEDDING,
+                    dtype=DataType.SPARSE_FLOAT_VECTOR,
+                    description="Chunk sparse embedding for hybrid retrieval",
+                )
+            )
+
+        fields.extend([
             FieldSchema(
                 name=_FIELD_CONTENT,
                 dtype=DataType.VARCHAR,
@@ -195,7 +215,7 @@ class MilvusVectorStore(BaseVectorStore):
                 dtype=DataType.INT64,
                 description="Unix timestamp (seconds)",
             ),
-        ]
+        ])
 
         return CollectionSchema(
             fields=fields,
@@ -203,8 +223,8 @@ class MilvusVectorStore(BaseVectorStore):
             enable_dynamic_field=True,  # 允许存储 schema 未定义的额外字段
         )
 
-    def _build_index_params(self) -> dict:
-        """构建向量索引参数"""
+    def _build_dense_index_params(self) -> dict:
+        """构建 Dense 向量索引参数"""
         if self._index_type == "HNSW":
             return {
                 "index_type": "HNSW",
@@ -233,6 +253,17 @@ class MilvusVectorStore(BaseVectorStore):
                 "params": {},
             }
 
+    @staticmethod
+    def _build_sparse_index_params() -> dict:
+        """构建 Sparse 向量索引参数。"""
+        return {
+            "index_type": "SPARSE_INVERTED_INDEX",
+            "metric_type": "IP",
+            "params": {
+                "drop_ratio_build": 0.0,
+            },
+        }
+
     def _ensure_collection(self) -> None:
         """确保 Collection 存在并已加载到内存（同步，在线程中调用）"""
         from pymilvus import Collection, utility
@@ -249,11 +280,17 @@ class MilvusVectorStore(BaseVectorStore):
             # 为向量字段创建 ANN 索引
             collection.create_index(
                 field_name=_FIELD_EMBEDDING,
-                index_params=self._build_index_params(),
+                index_params=self._build_dense_index_params(),
             )
+            if self._enable_sparse_hybrid:
+                collection.create_index(
+                    field_name=_FIELD_SPARSE_EMBEDDING,
+                    index_params=self._build_sparse_index_params(),
+                )
             # 为高频过滤字段创建标量索引，加速 WHERE 过滤
             collection.create_index(field_name=_FIELD_KB_ID, index_name="idx_kb_id")
             collection.create_index(field_name=_FIELD_DOC_ID, index_name="idx_doc_id")
+            self._has_sparse_field = self._enable_sparse_hybrid
 
             logger.info(
                 "milvus_collection_created",
@@ -262,6 +299,14 @@ class MilvusVectorStore(BaseVectorStore):
             )
         else:
             collection = Collection(self._collection_name)
+            field_names = {field.name for field in collection.schema.fields}
+            self._has_sparse_field = _FIELD_SPARSE_EMBEDDING in field_names
+            if self._enable_sparse_hybrid and not self._has_sparse_field:
+                logger.warning(
+                    "milvus_collection_missing_sparse_field",
+                    collection=self._collection_name,
+                    hint="recreate collection or disable RETRIEVAL_ENABLE_MILVUS_HYBRID",
+                )
 
         # 加载 Collection 到内存（查询前必须 load）
         collection.load()
@@ -288,6 +333,46 @@ class MilvusVectorStore(BaseVectorStore):
         texts: list[str],
         metadatas: list[dict] | None = None,
     ) -> None:
+        """批量 Upsert Dense 向量。"""
+        collection = await self._get_collection()
+        await self._upsert_rows(
+            collection=collection,
+            ids=ids,
+            embeddings=embeddings,
+            sparse_embeddings=None,
+            texts=texts,
+            metadatas=metadatas,
+        )
+
+    async def add_hybrid(
+        self,
+        ids: list[str],
+        embeddings: list[list[float]],
+        sparse_embeddings: list[dict[int, float]],
+        texts: list[str],
+        metadatas: list[dict] | None = None,
+    ) -> None:
+        """批量 Upsert Dense + Sparse 向量。"""
+        collection = await self._get_collection()
+        self._ensure_hybrid_capable()
+        await self._upsert_rows(
+            collection=collection,
+            ids=ids,
+            embeddings=embeddings,
+            sparse_embeddings=sparse_embeddings,
+            texts=texts,
+            metadatas=metadatas,
+        )
+
+    async def _upsert_rows(
+        self,
+        collection,
+        ids: list[str],
+        embeddings: list[list[float]],
+        sparse_embeddings: list[dict[int, float]] | None,
+        texts: list[str],
+        metadatas: list[dict] | None,
+    ) -> None:
         """
         批量 Upsert 向量（幂等操作）
 
@@ -296,7 +381,6 @@ class MilvusVectorStore(BaseVectorStore):
         - 分批写入，避免单次请求过大（Milvus 默认限制 16MB）
         - 截断超长文本，防止 VARCHAR 溢出
         """
-        collection = await self._get_collection()
         metas = metadatas or [{} for _ in ids]
         now = int(time.time())
 
@@ -306,16 +390,21 @@ class MilvusVectorStore(BaseVectorStore):
             batch_embs = embeddings[i: i + batch_size]
             batch_texts = texts[i: i + batch_size]
             batch_metas = metas[i: i + batch_size]
+            batch_sparse = sparse_embeddings[i: i + batch_size] if sparse_embeddings is not None else None
 
             data = [
                 batch_ids,
                 batch_embs,
+            ]
+            if self._has_sparse_field:
+                data.append(batch_sparse or [{} for _ in batch_ids])
+            data.extend([
                 [t[:_MAX_CONTENT_LEN] for t in batch_texts],
                 [m.get("knowledge_base_id", "")[:_MAX_ID_LEN] for m in batch_metas],
                 [m.get("document_id", "")[:_MAX_ID_LEN] for m in batch_metas],
                 [m.get("source", "")[:_MAX_SOURCE_LEN] for m in batch_metas],
                 [now] * len(batch_ids),
-            ]
+            ])
 
             await asyncio.to_thread(collection.upsert, data)
 
@@ -326,6 +415,7 @@ class MilvusVectorStore(BaseVectorStore):
             "milvus_vectors_upserted",
             count=len(ids),
             total=collection.num_entities,
+            hybrid=self._has_sparse_field and sparse_embeddings is not None,
         )
 
     async def search(
@@ -364,23 +454,64 @@ class MilvusVectorStore(BaseVectorStore):
             )
 
         results = await asyncio.to_thread(_do_search)
+        return self._convert_hits(results)
 
-        output: list[VectorSearchResult] = []
-        for hit in results[0]:
-            entity = hit.entity
-            output.append(VectorSearchResult(
-                chunk_id=hit.id,
-                score=float(hit.score),
-                content=entity.get(_FIELD_CONTENT, ""),
-                metadata={
-                    "knowledge_base_id": entity.get(_FIELD_KB_ID, ""),
-                    "document_id": entity.get(_FIELD_DOC_ID, ""),
-                    "source": entity.get(_FIELD_SOURCE, ""),
-                    "created_at": entity.get(_FIELD_CREATED_AT, 0),
-                },
-            ))
+    async def search_hybrid(
+        self,
+        query_embedding: list[float],
+        query_sparse_embedding: dict[int, float],
+        top_k: int = 5,
+        filter_metadata: dict | None = None,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.5,
+        ranker: str = "weighted",
+        candidate_limit: int | None = None,
+        rrf_k: int = 60,
+    ) -> list[VectorSearchResult]:
+        """Dense + Sparse 混合检索。"""
+        from pymilvus import AnnSearchRequest, RRFRanker, WeightedRanker
 
-        return output
+        collection = await self._get_collection()
+        self._ensure_hybrid_capable()
+
+        expr = _build_filter_expr(filter_metadata)
+        fetch_k = max(top_k, candidate_limit or top_k * 4)
+
+        requests = [
+            AnnSearchRequest(
+                data=[query_embedding],
+                anns_field=_FIELD_EMBEDDING,
+                param=self._build_search_params(),
+                limit=fetch_k,
+                expr=expr or None,
+            ),
+            AnnSearchRequest(
+                data=[query_sparse_embedding],
+                anns_field=_FIELD_SPARSE_EMBEDDING,
+                param=self._build_sparse_search_params(),
+                limit=fetch_k,
+                expr=expr or None,
+            ),
+        ]
+        reranker = (
+            RRFRanker(rrf_k)
+            if ranker.lower() == "rrf"
+            else WeightedRanker(dense_weight, sparse_weight)
+        )
+
+        def _do_search():
+            return collection.hybrid_search(
+                reqs=requests,
+                rerank=reranker,
+                limit=top_k,
+                output_fields=[
+                    _FIELD_CONTENT, _FIELD_KB_ID, _FIELD_DOC_ID,
+                    _FIELD_SOURCE, _FIELD_CREATED_AT,
+                ],
+            )
+
+        results = await asyncio.to_thread(_do_search)
+        return self._convert_hits(results)
 
     async def delete(self, ids: list[str]) -> None:
         """按 chunk_id 批量删除"""
@@ -442,6 +573,38 @@ class MilvusVectorStore(BaseVectorStore):
             return {"metric_type": self._metric_type, "params": {"nprobe": 16}}
         else:
             return {"metric_type": self._metric_type, "params": {}}
+
+    @staticmethod
+    def _build_sparse_search_params() -> dict:
+        return {"metric_type": "IP", "params": {"drop_ratio_search": 0.0}}
+
+    def _ensure_hybrid_capable(self) -> None:
+        if not self._has_sparse_field:
+            raise RuntimeError(
+                "Current Milvus collection does not have sparse field support. "
+                "Recreate the collection or disable Milvus hybrid retrieval."
+            )
+
+    @staticmethod
+    def _convert_hits(results) -> list[VectorSearchResult]:
+        output: list[VectorSearchResult] = []
+        if not results:
+            return output
+
+        for hit in results[0]:
+            entity = hit.entity
+            output.append(VectorSearchResult(
+                chunk_id=hit.id,
+                score=float(hit.score),
+                content=entity.get(_FIELD_CONTENT, ""),
+                metadata={
+                    "knowledge_base_id": entity.get(_FIELD_KB_ID, ""),
+                    "document_id": entity.get(_FIELD_DOC_ID, ""),
+                    "source": entity.get(_FIELD_SOURCE, ""),
+                    "created_at": entity.get(_FIELD_CREATED_AT, 0),
+                },
+            ))
+        return output
 
     async def get_collection_stats(self) -> dict:
         """获取 Collection 统计信息（运维/监控用）"""

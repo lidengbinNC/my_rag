@@ -5,9 +5,9 @@
 - 模块级单例：利用 Python 模块的天然单例特性管理全局组件
 - 对比 Java 的 Spring IoC 容器：Python 更轻量，用工厂 + 全局变量即可
 - 延迟初始化（Lazy Init）：首次访问时才创建，避免启动时加载全部重量级模型
-- 组件依赖链：Embedding → VectorStore(FAISS/Milvus) → DenseRetriever + SparseRetriever → HybridRetriever
-                                                                                              ↓
-                                             LLM → QueryRewriter + SemanticCache → RAGPipeline
+- 组件依赖链：Embedding → VectorStore(FAISS/Milvus) → Retriever
+                                                         ↓
+                                LLM → QueryRewriter + SemanticCache → RAGPipeline
 - VectorStore 切换：通过 VECTOR_STORE_PROVIDER 环境变量，零代码改动切换 FAISS ↔ Milvus
 """
 
@@ -70,6 +70,7 @@ def get_vector_store() -> BaseVectorStore:
                 provider="milvus",
                 dimension=get_embedding().dimension,
                 collection_name=vs_cfg.milvus_collection,
+                enable_sparse_hybrid=settings.retrieval.enable_milvus_hybrid,
                 host=vs_cfg.milvus_host,
                 port=vs_cfg.milvus_port,
                 user=vs_cfg.milvus_user,
@@ -94,27 +95,32 @@ def get_vector_store() -> BaseVectorStore:
     return _vector_store
 
 
-def get_sparse_retriever():
-    from my_rag.domain.retrieval.sparse_retriever import SparseRetriever
-    if not hasattr(get_sparse_retriever, "_instance"):
-        get_sparse_retriever._instance = SparseRetriever()
-    return get_sparse_retriever._instance
-
-
 def get_retriever() -> BaseRetriever:
     global _retriever
     if _retriever is None:
         from my_rag.domain.retrieval.dense_retriever import DenseRetriever
-        from my_rag.domain.retrieval.hybrid_retriever import HybridRetriever
+        from my_rag.domain.retrieval.milvus_hybrid_retriever import MilvusHybridRetriever
 
-        dense = DenseRetriever(embedding=get_embedding(), vector_store=get_vector_store())
-        sparse = get_sparse_retriever()
+        embedding = get_embedding()
+        vector_store = get_vector_store()
 
-        _retriever = HybridRetriever(
-            dense_retriever=dense,
-            sparse_retriever=sparse,
-            rrf_k=settings.retrieval.rrf_k,
-        )
+        if (
+            settings.vector_store.provider == "milvus"
+            and settings.retrieval.enable_milvus_hybrid
+            and embedding.supports_sparse
+            and vector_store.supports_hybrid
+        ):
+            _retriever = MilvusHybridRetriever(
+                embedding=embedding,
+                vector_store=vector_store,
+                ranker=settings.retrieval.hybrid_ranker,
+                dense_weight=settings.retrieval.hybrid_dense_weight,
+                sparse_weight=settings.retrieval.hybrid_sparse_weight,
+                candidate_limit=settings.retrieval.hybrid_candidate_limit,
+                rrf_k=settings.retrieval.rrf_k,
+            )
+        else:
+            _retriever = DenseRetriever(embedding=embedding, vector_store=vector_store)
     return _retriever
 
 

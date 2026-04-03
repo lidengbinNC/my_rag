@@ -92,6 +92,10 @@ class LocalEmbedding(BaseEmbedding):
     def _is_bge_m3(self) -> bool:
         return "bge-m3" in self._model_name.lower()
 
+    @property
+    def supports_sparse(self) -> bool:
+        return self._is_bge_m3()
+
     def _get_flag_model(self):
         """获取 FlagEmbedding 模型（BGE-M3 专用）"""
         if self._flag_model is None:
@@ -191,6 +195,14 @@ class LocalEmbedding(BaseEmbedding):
         """BGE-M3 专用：查询的 Dense + Sparse 向量"""
         dense_list, sparse_list = await self.embed_documents_with_sparse([text])
         return dense_list[0], sparse_list[0]
+
+    async def embed_documents_hybrid(
+        self, texts: list[str]
+    ) -> tuple[list[list[float]], list[dict[int, float]]]:
+        return await self.embed_documents_with_sparse(texts)
+
+    async def embed_query_hybrid(self, text: str) -> tuple[list[float], dict[int, float]]:
+        return await self.embed_query_with_sparse(text)
 
     # ── 内部辅助 ──────────────────────────────────────────────────────────
 

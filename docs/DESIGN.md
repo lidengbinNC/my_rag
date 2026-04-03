@@ -187,8 +187,9 @@ my_rag/
 │       │   ├── retrieval/         # 检索引擎
 │       │   │   ├── base.py        # 检索器抽象基类
 │       │   │   ├── dense_retriever.py    # 稠密向量检索
-│       │   │   ├── sparse_retriever.py   # 稀疏检索（BM25）
-│       │   │   ├── hybrid_retriever.py   # 混合检索 + RRF
+│       │   │   ├── milvus_hybrid_retriever.py   # Milvus Dense + Sparse 混合检索
+│       │   │   ├── sparse_retriever.py   # 稀疏检索（BM25，兼容/历史方案）
+│       │   │   ├── hybrid_retriever.py   # 混合检索 + RRF（兼容/历史方案）
 │       │   │   └── query_transform.py    # 查询改写/扩展
 │       │   │
 │       │   ├── reranker/          # 重排序
@@ -420,30 +421,31 @@ class BaseEmbedding(ABC):
   - **IVF_FLAT** / **IVF_PQ**：适合大规模数据，支持量化压缩
 - **元数据过滤**：支持按文档来源、时间范围、标签等进行预过滤
 
-#### 4.2.3 稀疏检索（Sparse Retrieval - BM25）
+#### 4.2.3 稀疏检索（Sparse Retrieval - Milvus Sparse）
 
-> **面试考点**：BM25 公式、TF-IDF 原理、倒排索引
+> **面试考点**：稀疏向量、词项权重、Dense + Sparse 混合检索
 
-- 使用 `rank_bm25` 库或 Elasticsearch 实现
+- 使用 BGE-M3 生成 Sparse 向量，写入 Milvus 的 `SPARSE_FLOAT_VECTOR` 字段
+- 通过 Milvus `hybrid_search` 统一执行 Dense + Sparse 两路召回
 - 对关键词、专业术语、ID 类查询有独特优势
 - 与稠密检索形成互补
 
-#### 4.2.4 混合检索与 RRF 融合
+#### 4.2.4 混合检索与融合
 
-> **面试考点**：Reciprocal Rank Fusion 原理、混合检索为什么优于单一检索
+> **面试考点**：Weighted Ranker / RRF、混合检索为什么优于单一检索
 
 ```python
-# RRF 核心公式
-def rrf_score(rank: int, k: int = 60) -> float:
-    return 1.0 / (k + rank)
-
-# 融合逻辑：对每个候选文档，将其在各检索器中的 RRF 分数相加
+# Weighted Ranker（Milvus 原生）
+dense_score = 0.6
+sparse_score = 0.4
+final_score = dense_weight * dense_score + sparse_weight * sparse_score
 ```
 
 **配置参数**：
 - `dense_weight`：稠密检索权重
 - `sparse_weight`：稀疏检索权重
-- `rrf_k`：RRF 常数（通常为 60）
+- `ranker`：`weighted` 或 `rrf`
+- `rrf_k`：RRF 常数（启用 RRF 时使用）
 - `top_k`：最终返回文档数
 
 #### 4.2.5 查询改写（Query Transform）
@@ -1094,6 +1096,7 @@ async def health_check():
 | v1.0 | 2026-02-27 | 初始版本，完成整体设计 |
 | v1.1 | 2026-03-16 | Embedding 切换为 BGE-M3（维度 1024，支持 Dense + Sparse 双向量）；向量存储切换为 Milvus（Docker 独立编排文件 docker-compose.milvus.yml）；LocalEmbedding 增加 FlagEmbedding 后端支持稀疏向量接口 |
 | v1.2 | 2026-03-16 | 关系数据库从 SQLite 切换为 MySQL 8.0（aiomysql 异步驱动）；ORM 模型适配 MySQL（String 主键长度、utf8mb4 字符集、server_default 时间戳）；session.py 添加连接池调优参数；docker-compose.yml 新增 MySQL 服务及自定义配置 |
+| v1.3 | 2026-03-19 | 检索主路径从进程内 `rank_bm25` 重构为 Milvus Dense + Sparse Hybrid；文档摄入/删除流程移除 BM25 内存索引维护；依赖注入默认在 Milvus + BGE-M3 下启用原生 hybrid search |
 
 
 
@@ -1104,7 +1107,7 @@ RAG 架构演进 — Naive / Advanced / Modular RAG，Self-RAG，Corrective RAG
 分块策略 — Fixed / Recursive / Semantic 三种策略 + Parent-Child 高级策略
 Embedding — Dense / Sparse / Multi-Vector，本地模型与 API 双支持
 向量检索 — HNSW/IVF 索引算法、ANN 原理、元数据过滤
-混合检索 — Dense + BM25 + RRF 融合，查询改写（HyDE/Multi-Query）
+混合检索 — Milvus Dense + Sparse Hybrid，查询改写（HyDE/Multi-Query）
 重排序 — Bi-Encoder vs Cross-Encoder，两阶段检索精排
 LLM 集成 — 流式输出（SSE/WebSocket）、Token 管理、多模型切换
 Prompt 工程 — 模板管理、Few-Shot、CoT

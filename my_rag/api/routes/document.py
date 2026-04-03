@@ -343,11 +343,9 @@ async def delete_document(
 
     await db.delete(doc)
 
-    # 从 BM25 内存索引中移除该文档的所有 chunk（DB 级联删除由 ORM 处理）
-    from my_rag.core.dependencies import get_sparse_retriever, get_vector_store
-    get_sparse_retriever().remove_by_document_id(doc_id)
+    from my_rag.core.dependencies import get_vector_store
 
-    # 删除整个文档的所有 chunk（更常用）
+    # 删除整个文档在 Milvus 中的所有 chunk
     milvus_store = get_vector_store()
     await milvus_store.delete_by_metadata("document_id", doc_id)
     return APIResponse(message="文档已删除")
